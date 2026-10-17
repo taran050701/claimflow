@@ -23,6 +23,9 @@ Simulates what a health insurer does with medical claims: **validate** them,
 **adjudicate** them through an ordered rules engine, track them through a
 **state machine**, issue a **remittance**, and **audit-log** every decision.
 
+**Prefer a visual tour? Open the [dashboard](/)**: every claim, why it was decided,
+its remittance and its verified audit trail, in one page.
+
 ### Try it in 60 seconds
 1. **`GET /claims`**: the demo claims (paid, denied, pended, rejected, appealed).
 2. Copy the `id` of a `DENIED` claim, then **`GET /claims/{claim_id}/explanation`**:
