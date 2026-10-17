@@ -97,6 +97,28 @@
                          border-radius: 50%; background: var(--accent); }
   .ok { color: var(--paid); font-weight: 600; } .bad { color: var(--denied); font-weight: 600; }
   .empty { color: var(--muted); padding: 24px 16px; }
+
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+                padding: 8px 12px 8px 16px; border-bottom: 1px solid var(--line); }
+  .panel .panel-head h2 { border: 0; padding: 0; }
+  .btn { display: inline-block; border: 1px solid var(--accent); background: var(--accent); color: #fff;
+         border-radius: 8px; padding: 5px 12px; font: inherit; font-size: 14px; font-weight: 600;
+         text-decoration: none; cursor: pointer; }
+  .btn.ghost { background: transparent; color: var(--accent); }
+  .btn:disabled { opacity: .6; cursor: default; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+  .actions input { flex: 1 1 200px; width: auto; }
+  input, select { font: inherit; font-size: 14px; color: var(--ink); background: var(--bg);
+                  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 100%; min-width: 0; }
+  .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .field { display: grid; gap: 4px; font-size: 13px; color: var(--muted); align-content: start; }
+  .presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .line { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.4fr) auto;
+          gap: 8px; margin-bottom: 8px; }
+  .line-head { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  .icon { border: 0; background: none; color: var(--muted); font-size: 20px; line-height: 1; cursor: pointer; padding: 0 6px; }
+  .check { display: flex; gap: 8px; align-items: center; font-size: 14px; margin-top: 16px; }
+  .check input { width: auto; }
   footer { color: var(--muted); font-size: 13px; padding-block: 0 30px; }
 </style>
 </head>
@@ -117,7 +139,8 @@
     What a health insurer does when a doctor's bill arrives: <strong>validate</strong> it,
     <strong>adjudicate</strong> it through an ordered rules engine, move it through a strict
     <strong>lifecycle</strong>, explain every dollar in a <strong>remittance</strong>, and record every
-    decision in a <strong>tamper-evident audit log</strong>. Pick a claim to see why it was decided.
+    decision in a <strong>tamper-evident audit log</strong>. Pick a claim to see why it was decided,
+    or submit your own with <a href="#new">New claim</a>.
   </p>
   <div id="notice" class="notice" role="status">Loading… the free server can take up to a minute to wake up.</div>
 
@@ -125,7 +148,7 @@
 
   <section class="layout">
     <div class="panel">
-      <h2>Claims</h2>
+      <div class="panel-head"><h2>Claims</h2><a class="btn" href="#new">+ New claim</a></div>
       <div class="filters" id="filters" role="group" aria-label="Filter by status"></div>
       <div class="list" id="list"></div>
     </div>
@@ -136,8 +159,9 @@
 </main>
 
 <footer class="wrap">
-  Read-only view of the live API. Every value on this page comes from ClaimFlow's JSON endpoints,
-  the same ones documented in <a href="/docs">/docs</a>. All members and claims are fictional.
+  Every value on this page comes from ClaimFlow's JSON endpoints, the same ones documented in
+  <a href="/docs">/docs</a>. Claims you submit are saved in the demo database. All members are
+  fictional: never enter real patient information.
 </footer>
 
 <script>
@@ -161,14 +185,32 @@ function el(tag, attrs, ...children) {
   return node;
 }
 
-async function api(path) {
-  const resp = await fetch(path, { headers: { Accept: "application/json" } });
+async function api(path, { method = "GET", body, headers = {} } = {}) {
+  const resp = await fetch(path, {
+    method,
+    headers: { Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}), ...headers },
+    body: body ? JSON.stringify(body) : undefined,
+  });
   if (!resp.ok) {
-    const body = await resp.json().catch(() => ({}));
-    throw Object.assign(new Error(body.detail || resp.statusText), { status: resp.status });
+    const data = await resp.json().catch(() => ({}));
+    throw Object.assign(new Error(errorText(data.detail) || resp.statusText), { status: resp.status });
   }
   return resp.json();
 }
+
+// 409s carry a sentence; 422s (bad request body) carry a list of {loc, msg}, one per field.
+function errorText(detail) {
+  if (!Array.isArray(detail)) return detail;
+  return detail.map((d) => `${d.loc.filter((p) => p !== "body").join(".")}: ${d.msg}`).join("; ");
+}
+
+// One explicit call per lifecycle action (a test checks these paths exist in the API).
+const ACTIONS = {
+  validate: (id) => api(`/claims/${id}/validate`, { method: "POST" }),
+  adjudicate: (id) => api(`/claims/${id}/adjudicate`, { method: "POST" }),
+  finalize: (id) => api(`/claims/${id}/finalize`, { method: "POST" }),
+  appeal: (id, reason) => api(`/claims/${id}/appeal`, { method: "POST", body: { reason } }),
+};
 
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const money = (v) => usd.format(Number(v || 0));
@@ -260,6 +302,7 @@ async function renderDetail() {
   const id = selectedId();
   const panel = document.getElementById("detail");
   renderList();
+  if (location.hash === "#new") return renderForm(panel);
   if (!id) return;
   panel.replaceChildren(el("div", { class: "empty" }, "Loading claim…"));
 
@@ -294,7 +337,41 @@ function header(c) {
     el("div", { class: "title" }, el("h2", {}, `Claim ${shortId(c.id)}`), badge(c.status)),
     el("div", { class: "facts" },
       `Date of service ${c.date_of_service} · member ${c.member_id} · provider NPI ${c.provider_npi} · ` +
-      `diagnoses ${c.diagnosis_codes.join(", ") || "none"} · billed ${money(c.total_billed)} · ${next}`));
+      `diagnoses ${c.diagnosis_codes.join(", ") || "none"} · billed ${money(c.total_billed)} · ${next}`),
+    actionButtons(c));
+}
+
+// The next lifecycle steps as buttons: exactly the claim's allowed_actions, so the
+// page never offers a move the state machine would refuse.
+function actionButtons(c) {
+  if (!c.allowed_actions.length) return null;
+  const box = el("div", { class: "actions" });
+  const run = async (button, call) => {
+    box.querySelectorAll("button, input").forEach((b) => { b.disabled = true; });
+    button.textContent = "Working…";
+    try {
+      await call();
+      await refresh();
+      await renderDetail();
+    } catch (err) {
+      box.append(el("span", { class: "bad" }, err.message));
+      box.querySelectorAll("button, input").forEach((b) => { b.disabled = false; });
+    }
+  };
+  for (const action of c.allowed_actions) {
+    const label = action[0].toUpperCase() + action.slice(1);
+    if (action === "appeal") {
+      const reason = el("input", { value: "Requesting reconsideration", maxlength: "500", "aria-label": "Appeal reason" });
+      const button = el("button", { class: "btn ghost", type: "button",
+        onclick: () => run(button, () => ACTIONS.appeal(c.id, reason.value)) }, label);
+      box.append(reason, button);
+    } else {
+      const button = el("button", { class: "btn", type: "button",
+        onclick: () => run(button, () => ACTIONS[action](c.id)) }, label);
+      box.append(button);
+    }
+  }
+  return box;
 }
 
 function decisions(claim, explanation) {
@@ -370,15 +447,186 @@ function auditTrail(events, verify) {
   ];
 }
 
+// ---------------------------------------------------------------- new claim
+let reference = null;  // GET /reference, loaded the first time the form opens
+
+// Ready-made claims, each taking a different path through validation and the rules.
+const PRESETS = [
+  { label: "Office visit → paid", member: "M1001", npi: "1234567893", dx: "J06.9", lines: [["99214", 1, "200.00"]] },
+  { label: "Lab work → deductible", member: "M1002", npi: "1234567893", dx: "E11.9",
+    lines: [["80053", 1, "60.00"], ["85025", 1, "40.00"], ["36415", 1, "20.00"]] },
+  { label: "3 visits in a day → CO-151", member: "M1002", npi: "1234567893", dx: "I10", lines: [["99214", 3, "600.00"]] },
+  { label: "Coverage ended → CO-27", member: "M1003", npi: "1234567893", dx: "I10", lines: [["99213", 1, "150.00"]] },
+  { label: "MRI without auth → CO-197", member: "M1004", npi: "1987654328", dx: "M17.11", lines: [["73721", 1, "1400.00"]] },
+  { label: "Therapy not covered → CO-96", member: "M1002", npi: "1543210987", dx: "M17.11", lines: [["97110", 2, "160.00"]] },
+  { label: "Retired codes → rejected", member: "M1001", npi: "1234567893", dx: "M54.5", lines: [["99201", 1, "120.00"]] },
+];
+
+function daysAgo(n) {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function coverageText(coverages) {
+  if (!coverages.length) return "no coverage";
+  // "Gold PPO" · "Gold PPO, ended 2026-06-30" · "Bronze HMO → Gold PPO from 2026-07-01"
+  const last = coverages[coverages.length - 1];
+  const names = coverages.map((c) => c.plan_name).join(" → ");
+  if (last.end_date) return `${names}, ended ${last.end_date}`;
+  return coverages.length > 1 ? `${names} from ${last.start_date}` : names;
+}
+
+function field(label, control, hint) {
+  return el("label", { class: "field" }, label, control, hint ? el("span", {}, hint) : null);
+}
+
+async function renderForm(panel) {
+  panel.replaceChildren(el("div", { class: "empty" }, "Loading form…"));
+  try {
+    reference = reference || await api("/reference");
+  } catch (err) {
+    panel.replaceChildren(el("div", { class: "empty" }, `Could not load reference data: ${err.message}`));
+    return;
+  }
+  if (location.hash !== "#new") return;  // user navigated away while loading
+
+  // One key per form: if the response is lost and the user presses Submit again,
+  // the API returns the claim it already created instead of creating a second one.
+  const idempotencyKey = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+
+  const member = el("select", {},
+    reference.members.map((m) => el("option", { value: m.id }, `${m.id} · ${m.name} · ${coverageText(m.coverages)}`)),
+    el("option", { value: "M9999" }, "M9999 · not a member (rejected)"));
+  const provider = el("select", {},
+    reference.providers.map((p) => el("option", { value: p.npi }, `${p.name} · ${p.specialty} · NPI ${p.npi}`)),
+    el("option", { value: "1234567890" }, "NPI 1234567890 · fails the check digit (rejected)"));
+  const dos = el("input", { type: "date", required: true });
+  const dx = el("input", { list: "dx-codes", placeholder: "e.g. J06.9, I10", autocomplete: "off" });
+  const total = el("input", { type: "number", min: "0", step: "0.01", required: true });
+  const lines = el("div", {});
+  const auto = el("input", { type: "checkbox", checked: true });
+  const submit = el("button", { class: "btn", type: "submit" }, "Submit claim");
+  const status = el("span", { class: "facts", role: "status" });
+
+  let totalEdited = false;  // the total follows the lines until the user types their own
+  total.addEventListener("input", () => { totalEdited = true; });
+  const syncTotal = () => {
+    if (totalEdited) return;
+    const sum = [...lines.querySelectorAll(".billed")].reduce((a, i) => a + Number(i.value || 0), 0);
+    total.value = sum.toFixed(2);
+  };
+
+  const lineRow = ([cpt, units, billed] = ["", 1, ""]) => {
+    const row = el("div", { class: "line" },
+      el("input", { class: "cpt", list: "cpt-codes", value: cpt, placeholder: "CPT, e.g. 99213",
+        required: true, autocomplete: "off", "aria-label": "Procedure code (CPT)" }),
+      el("input", { class: "units", type: "number", min: "1", max: "999", value: units, required: true, "aria-label": "Units" }),
+      el("input", { class: "billed", type: "number", min: "0", step: "0.01", value: billed, placeholder: "Billed $",
+        required: true, "aria-label": "Billed amount" }),
+      el("button", { class: "icon", type: "button", "aria-label": "Remove line",
+        onclick: () => { row.remove(); syncTotal(); } }, "×"));
+    row.addEventListener("input", syncTotal);
+    return row;
+  };
+
+  const apply = (preset) => {
+    member.value = preset.member;
+    provider.value = preset.npi;
+    dos.value = daysAgo(3 + Math.floor(Math.random() * 58));  // varied, so presets rarely hit the duplicate check
+    dx.value = preset.dx;
+    lines.replaceChildren(...preset.lines.map(lineRow));
+    totalEdited = false;
+    syncTotal();
+  };
+
+  const form = el("form", { class: "detail" },
+    el("div", { class: "title" }, el("h2", {}, "Submit a claim")),
+    el("div", { class: "facts" }, "Pick a scenario to fill the form, or enter your own. Each one takes a different path through the rules."),
+    el("div", { class: "presets" }, PRESETS.map((p) =>
+      el("button", { class: "chip", type: "button", onclick: () => apply(p) }, p.label))),
+
+    el("h3", {}, "Claim"),
+    el("div", { class: "fields" },
+      field("Member", member),
+      field("Provider", provider),
+      field("Date of service", dos),
+      field("Diagnosis codes (ICD-10)", dx, "comma-separated")),
+
+    el("h3", {}, "Service lines"),
+    el("div", { class: "line line-head" }, el("span", {}, "Procedure (CPT)"), el("span", {}, "Units"), el("span", {}, "Billed"), el("span", {})),
+    lines,
+    el("button", { class: "btn ghost", type: "button", onclick: () => { lines.append(lineRow()); } }, "+ Add line"),
+
+    el("h3", {}, "Total"),
+    el("div", { class: "fields" },
+      field("Total billed", total, "follows the lines; change it to see the total-mismatch check")),
+    el("label", { class: "check" }, auto, "Run every step automatically: validate → adjudicate → finalize"),
+    el("div", { class: "actions" }, submit, status),
+    el("div", { class: "facts" }, "Tip: submit the same claim twice to see the duplicate check (CO-18)."),
+
+    el("datalist", { id: "cpt-codes" }, reference.procedure_codes.map((c) => el("option", { value: c.code }, c.description))),
+    el("datalist", { id: "dx-codes" }, reference.diagnosis_codes.map((c) => el("option", { value: c.code }, c.description))),
+  );
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    status.className = "facts";
+    status.textContent = "Submitting…";
+    const body = {
+      member_id: member.value,
+      provider_npi: provider.value,
+      date_of_service: dos.value,
+      diagnosis_codes: dx.value.split(",").map((code) => code.trim()).filter(Boolean),
+      total_billed: total.value,
+      lines: [...lines.children].map((row) => ({
+        procedure_code: row.querySelector(".cpt").value.trim(),
+        units: Number(row.querySelector(".units").value),
+        billed_amount: row.querySelector(".billed").value,
+      })),
+    };
+    try {
+      let claim = await api("/claims", { method: "POST", body, headers: { "Idempotency-Key": idempotencyKey } });
+      // Walk the lifecycle only as far as the state machine allows: a rejected claim
+      // can't be adjudicated, a pended one can't be finalized.
+      for (const step of auto.checked ? ["validate", "adjudicate", "finalize"] : []) {
+        if (!claim.allowed_actions.includes(step)) break;
+        status.textContent = `${claim.status}: running ${step}…`;
+        claim = await ACTIONS[step](claim.id);
+      }
+      await refresh();
+      scrollOnLoad = true;
+      location.hash = `claim=${claim.id}`;
+    } catch (err) {
+      status.className = "bad";
+      status.textContent = `Not submitted: ${err.message}`;
+      submit.disabled = false;
+    }
+  });
+
+  panel.replaceChildren(form);
+  apply(PRESETS[0]);
+  if (scrollOnLoad && window.matchMedia("(max-width: 900px)").matches) {
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+  scrollOnLoad = false;
+}
+
 // ---------------------------------------------------------------- boot
+async function refresh() {
+  const [stats, page] = await Promise.all([api("/stats"), api("/claims?limit=100")]);
+  claims = page.items;
+  renderStats(stats);
+  renderFilters();
+  renderList();
+}
+
 async function boot() {
   const notice = document.getElementById("notice");
   try {
-    const [stats, page] = await Promise.all([api("/stats"), api("/claims?limit=100")]);
-    claims = page.items;
-    renderStats(stats);
-    renderFilters();
-    if (!selectedId() && claims.length) {
+    await refresh();
+    if (!selectedId() && location.hash !== "#new" && claims.length) {
       const denied = claims.find((c) => c.status === "DENIED") || claims[0];
       history.replaceState(null, "", `#claim=${denied.id}`);
     }
@@ -391,6 +639,7 @@ async function boot() {
 }
 
 window.addEventListener("hashchange", renderDetail);
+document.querySelectorAll('a[href="#new"]').forEach((a) => a.addEventListener("click", () => { scrollOnLoad = true; }));
 boot();
 </script>
 </body>

@@ -115,16 +115,17 @@ def test_health_and_root_answer_head_requests(client):
 
 
 def test_dashboard_only_calls_endpoints_that_exist(client):
-    """Guard: if an endpoint the page uses is renamed or removed, this fails
-    instead of the live dashboard silently breaking."""
+    """Guard: if an endpoint the page uses is renamed, removed or changes method,
+    this fails instead of the live dashboard silently breaking."""
     import re
 
     page = client.get("/").text
-    used = set(re.findall(r"api\(`?\"?(/[a-z/${}.]+)", page))
-    used = {re.sub(r"\$\{[^}]+\}", "{claim_id}", u).split("?")[0] for u in used}
-    routes = set(client.get("/openapi.json").json()["paths"])
-    assert used, "found no API calls in the page"
-    assert used <= routes, f"dashboard calls unknown endpoints: {used - routes}"
+    calls = re.findall(r'api\(\s*[`"](/[^`"?]+)[^`"]*[`"](?:,\s*\{\s*method:\s*"([A-Z]+)")?', page)
+    used = {(re.sub(r"\$\{[^}]+\}", "{claim_id}", path), method or "GET") for path, method in calls}
+    spec = client.get("/openapi.json").json()["paths"]
+    assert ("/claims", "POST") in used, "found no claim submission in the page"
+    unknown = {(path, m) for path, m in used if m.lower() not in spec.get(path, {})}
+    assert not unknown, f"dashboard calls unknown endpoints: {unknown}"
 
 
 def test_dashboard_never_inserts_api_data_as_html(client):
@@ -132,3 +133,16 @@ def test_dashboard_never_inserts_api_data_as_html(client):
     page = client.get("/").text
     assert "innerHTML" not in page and "outerHTML" not in page
     assert "insertAdjacentHTML" not in page and "document.write" not in page
+
+
+def test_reference_lists_what_a_claim_can_use(client):
+    body = client.get("/reference").json()
+
+    members = {m["id"]: m for m in body["members"]}
+    assert members["M1001"]["name"] == "Ava Patel"
+    assert [c["plan_id"] for c in members["M1004"]["coverages"]] == ["PLN-BRONZE", "PLN-GOLD"]
+    assert members["M1003"]["coverages"][0]["end_date"] == "2026-06-30"
+    assert {p["npi"] for p in body["providers"]} == {"1234567893", "1987654328", "1543210987"}
+    cpt = {c["code"]: c for c in body["procedure_codes"]}
+    assert cpt["99201"]["effective_end"] == "2020-12-31"  # retired codes are listed with their end
+    assert "J06.9" in {c["code"] for c in body["diagnosis_codes"]}

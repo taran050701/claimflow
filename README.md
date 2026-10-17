@@ -41,7 +41,13 @@ units), partially paid, pended, rejected, and an appeal that was overturned.
 Click any claim to see **why** it was decided: the deciding rule and what it
 looked at, the remittance with reason codes, and the verified audit trail.
 
-The dashboard is a read-only client of the JSON API. To explore the API itself,
+**Submit your own claim** with **+ New claim**: pick a scenario (office visit, lab
+work against the deductible, too many units, coverage ended, MRI without
+authorization, non-covered therapy, retired codes) or fill in your own, and watch
+it go through validation, the rules engine and finalization. Untick *Run every
+step* to step through the lifecycle yourself with the action buttons.
+
+The dashboard is just a client of the JSON API. To explore the API itself,
 open [`/docs`](https://claimflow-vpno.onrender.com/docs):
 
 1. `GET /claims`: browse the demo claims
@@ -175,6 +181,7 @@ uv run pytest                             # 166 tests against claimflow_test
 | GET | `/claims/{id}/explanation` | Why each line was decided, from the audit log |
 | GET | `/claims/{id}/audit`, `/audit/verify` | Hash-chained audit trail / integrity check |
 | GET | `/stats` | Claims by status, denial rates, top denial reasons, latency, where the money went |
+| GET | `/reference` | Members and their coverage, providers, CPT and ICD-10 code sets (feeds the claim form) |
 | GET | `/metrics`, `/health` | Prometheus metrics / health check |
 
 Full interactive docs at `/docs`.
@@ -199,7 +206,7 @@ src/claimflow/
   repositories/    SQLAlchemy queries; rows -> domain objects
   api/             FastAPI routers;  schemas.py = HTTP contract
   models.py        database schema;  middleware.py, metrics.py, logging_config.py
-  static/          index.html: the dashboard (plain HTML + JS, read-only API client)
+  static/          index.html: the dashboard (plain HTML + JS client of the API)
 migrations/        Alembic migrations 0001-0005 (incl. triggers, hash chain)
 scripts/           seed.py (reference data), demo_seed.py (demo claims), start.sh
 tests/             unit + integration tests

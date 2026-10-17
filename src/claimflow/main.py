@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from claimflow.api.claims import router as claims_router
+from claimflow.api.reference import router as reference_router
 from claimflow.api.stats import router as stats_router
 from claimflow.config import get_settings
 from claimflow.domain.errors import (
@@ -61,6 +62,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(claims_router)
     app.include_router(stats_router)
+    app.include_router(reference_router)
     app.middleware("http")(observe_requests)
 
     # Domain errors -> HTTP status codes, in one place.

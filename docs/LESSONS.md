@@ -2253,7 +2253,7 @@ the home page (`/`); Swagger stays at `/docs`.
 |---|---|---|
 | Plain JS, no framework | Zero build/deploy complexity; fits a backend portfolio | Manual DOM code; fine at this size, wouldn't scale to a big app |
 | Same origin as the API | No CORS, one deploy, one URL | UI and API scale/deploy together |
-| **Read-only** | The audit log is append-only: claims submitted from the demo could never be removed | Visitors who want to submit claims use Swagger |
+| Read-only at first, then a claim form (9.7) | Started read-only so demo data stayed clean; testers needed to submit from the page | Visitors' claims stay in the database forever (the audit log is append-only) |
 
 ### 9.3 Security: never put API data into HTML
 
@@ -2307,6 +2307,44 @@ behind it.
 - **Race guard:** if you click a second claim while the first is loading, the
   stale response is ignored (`if (selectedId() !== id) return`).
 
+### 9.7 Submitting claims from the page
+
+The dashboard got a **+ New claim** form (route `#new`) and action buttons on
+every claim.
+
+- **The form is built from the API, not hardcoded.** A new endpoint,
+  `GET /reference`, returns members with their plan coverage periods, providers,
+  and the CPT/ICD-10 code sets with effective dates. The member dropdown, provider
+  dropdown and code suggestions all come from it, so the form can't drift from
+  what the database actually accepts.
+- **Quick-fill scenarios**, each exercising a different rule: office visit (paid
+  with a copay), lab work (all to the deductible), too many units (CO-151),
+  coverage ended (CO-27), MRI without authorization (CO-197), non-covered
+  therapy (CO-96), retired codes (rejected in validation). The form also offers
+  an unknown member and an NPI that fails its check digit.
+- **Dates are randomized** (3–60 days ago) on quick fill. Otherwise the second
+  person to click "Office visit" would get a duplicate denial (CO-18) instead of
+  a payment. The duplicate check is still one click away: submit twice.
+- **Idempotency in the browser:** each form instance generates one
+  `Idempotency-Key` (`crypto.randomUUID()`). If the response is lost and you press
+  Submit again, the API returns the claim it already created instead of a second
+  copy. The key changes only when the form is reopened.
+- **Walking the lifecycle:** with *Run every step* ticked, the page calls
+  validate → adjudicate → finalize, but only while each step is in the claim's
+  `allowed_actions`. A rejected claim stops after validate; a pended one stops
+  before finalize. The UI never decides what's legal; the state machine does.
+- **Action buttons are `allowed_actions`.** On any claim, the buttons shown are
+  exactly what the API says is allowed next (Validate, Adjudicate, Finalize,
+  Appeal with a reason). The server would refuse anything else with a 409 anyway.
+- **Errors made readable:** a 409 carries a sentence; a 422 carries a list of
+  `{loc, msg}` per bad field, which the page turns into `lines.0.units: ...`.
+- **Contract test, stronger:** it now checks the **HTTP method** too, not just
+  the path. `POST /claims/{id}/finalize` must exist as a POST.
+- **Verified in a headless browser:** every quick-fill scenario reached its
+  expected status and reason code, manual stepping went
+  RECEIVED → VALIDATED → ADJUDICATED → PAID, a wrong total was rejected, and the
+  form doesn't overflow a phone screen.
+
 ### Phase 9: questions
 
 **Q9.1 (interview).** Why plain HTML/JS instead of React for the dashboard?
@@ -2333,15 +2371,18 @@ values as **text**, which the browser never executes. A test fails the build if
 
 </details>
 
-**Q9.3 (interview).** Why is the dashboard read-only?
+**Q9.3 (interview).** The dashboard started read-only and later got a claim
+form. Why both decisions?
 
 <details><summary>Answer</summary>
 
-The audit log is append-only by design (triggers + hash chain), and claims
-can't be deleted because their audit history references them. Anything a
-visitor submitted through a public demo would stay forever. Showing everything
-read-only keeps the demo clean; Swagger remains available for anyone who wants
-to exercise the write endpoints.
+Read-only first because the audit log is append-only (triggers + hash chain):
+anything a visitor submits stays forever, so read-only kept the demo clean.
+Then real use showed the cost: testing meant leaving the page for Swagger and
+hand-writing JSON. Being able to try it yourself is the point of a demo, so I
+added the form and accepted that demo claims accumulate. Same facts, different
+weighting once there was feedback. If junk became a problem: rate limits, or a
+nightly reset of a separate demo database.
 
 </details>
 
@@ -2373,6 +2414,44 @@ By testing what the user sees: a headless browser loaded the page on desktop
 and phone sizes, clicked through it, collected console errors and took
 screenshots. That caught a rendering bug, a styling bug, a mobile overflow and
 a mobile usability issue that no API test could see.
+
+</details>
+
+**Q9.7 (interview).** Why add a `/reference` endpoint instead of hardcoding the
+members and codes in the page?
+
+<details><summary>Answer</summary>
+
+A single source of truth. The seed data lives in the database; a hardcoded copy
+in JavaScript would drift the first time someone adds a member or retires a code,
+and the form would offer choices the backend rejects. The endpoint is small,
+read-only and cacheable, and any other client (a provider portal, a test
+harness) can use it too.
+
+</details>
+
+**Q9.8 (interview).** A user double-clicks Submit, or their connection drops
+just after submitting. How does your form avoid duplicate claims?
+
+<details><summary>Answer</summary>
+
+Two layers. The button is disabled while the request is in flight, which handles
+double clicks. For lost responses, the form sends an `Idempotency-Key` generated
+once per form: the retry carries the same key, and the API returns the existing
+claim (200) instead of creating another. Same key with a *different* body gets a
+409, because that's a client bug, not a retry.
+
+</details>
+
+**Q9.9 (bonus).** Why does the page only show action buttons from
+`allowed_actions` instead of working out the next step itself?
+
+<details><summary>Answer</summary>
+
+The lifecycle rules live in one place: the server's state machine (backed by a
+database trigger). If the UI copied them, the two would eventually disagree.
+Rendering exactly what the API returns keeps the UI simple and always correct,
+and the server still rejects illegal moves (409) if a stale page tries one.
 
 </details>
 
