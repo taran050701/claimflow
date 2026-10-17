@@ -17,6 +17,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     Enum,
+    FetchedValue,
     ForeignKey,
     Identity,
     Index,
@@ -267,19 +268,38 @@ class ClaimLine(Base):
 
 
 class AuditEvent(Base):
-    """One row per decision or state change. Made append-only in Phase 6."""
+    """Append-only, tamper-evident record of every decision and state change.
+
+    One row per state change, per failed validation edit, and per rule
+    evaluation. The database (migration 0005):
+      - fills seq, prev_hash, hash and created_at in a BEFORE INSERT trigger,
+        chaining each event to the previous one for the same claim;
+      - rejects every UPDATE, DELETE and TRUNCATE.
+    """
 
     __tablename__ = "audit_events"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     claim_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("claims.id"))
+    seq: Mapped[int] = mapped_column(server_default=FetchedValue())  # 1, 2, 3... per claim
+    # Groups every event written by one operation (e.g. one adjudication run).
+    correlation_id: Mapped[uuid.UUID | None]
     event_type: Mapped[str] = mapped_column(String(40))
     from_status: Mapped[str | None] = mapped_column(String(20))
     to_status: Mapped[str | None] = mapped_column(String(20))
-    details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    rule_name: Mapped[str | None] = mapped_column(String(40))  # rule or validation edit
+    line_number: Mapped[int | None]  # None = claim level
+    outcome: Mapped[str | None] = mapped_column(String(10))  # PASS / DENY / PEND / FAIL
+    reason_code: Mapped[str | None] = mapped_column(String(5))  # CARC
+    details: Mapped[dict] = mapped_column(JSONB, default=dict)  # message + rule inputs
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    prev_hash: Mapped[str] = mapped_column(String(64), server_default=FetchedValue())
+    hash: Mapped[str] = mapped_column(String(64), server_default=FetchedValue())
 
-    __table_args__ = (Index("ix_audit_events_claim_created", "claim_id", "created_at"),)
+    __table_args__ = (
+        UniqueConstraint("claim_id", "seq", name="uq_audit_events_claim_seq"),
+        Index("ix_audit_events_rule_outcome", "rule_name", "outcome"),
+    )
 
 
 class ClaimValidationIssue(Base):

@@ -13,6 +13,7 @@ as they're completed.
 - [Phase 3: Rules engine](#phase-3-rules-engine)
 - [Phase 4: State machine](#phase-4-state-machine)
 - [Phase 5: Remittance](#phase-5-remittance)
+- [Phase 6: Audit log](#phase-6-audit-log)
 - [Glossary](#glossary)
 
 ---
@@ -1532,6 +1533,251 @@ check happens to run first, and passes or fails for the wrong reason.
 
 ---
 
+## Phase 6: Audit log
+
+### 6.1 Why it matters
+
+Regulators, auditors, appeal reviewers and providers ask **"why was this claim
+denied?"**, sometimes years later. The answer must be:
+- **exact**: which rule, which line, what it looked at, what it decided, when
+- **trustworthy**: provably not edited since it was written
+
+### 6.2 One row per decision
+
+Before Phase 6, an adjudication wrote **one** event with the whole rule trace
+inside a JSON blob. Now every decision is **its own row** with real columns:
+
+| Event type | Written when | Key columns |
+|---|---|---|
+| `CLAIM_RECEIVED`, `CLAIM_VALIDATED`, `CLAIM_PAID`, … | every status change | `from_status`, `to_status` |
+| `VALIDATION_EDIT_FAILED` | each failed edit | `rule_name` (edit code), `line_number`, `reason_code` |
+| `RULE_EVALUATED` | **each** rule evaluation | `rule_name`, `line_number`, `outcome` (PASS/DENY/PEND), `reason_code`, `details.inputs` |
+
+**Rule inputs:** each rule now returns the facts it looked at (the coverage
+spans Eligibility saw, the auths PriorAuth considered, the rates and
+accumulators Pricing used). The log shows **why**, not just **what**.
+
+**Correlation id:** every row written by one operation (one validation, one
+adjudication run) shares a `correlation_id`, so "the latest adjudication run"
+is one filter, and a re-adjudicated claim's runs don't get mixed up.
+
+Real columns instead of JSON make questions like *"how many lines did
+PriorAuth deny this week?"* a plain, indexed SQL query
+(`ix_audit_events_rule_outcome`).
+
+### 6.3 Append-only, enforced by the database
+
+Triggers on `audit_events` reject **UPDATE, DELETE and TRUNCATE** (tested: each
+raises `audit_events is append-only`).
+
+Two complementary controls:
+
+| Control | Answers | Example |
+|---|---|---|
+| **Privileges** (GRANT/REVOKE) | *Who* may do something | App role gets only `INSERT, SELECT` on `audit_events` (**least privilege**) |
+| **Triggers** | *What* anyone may do | No UPDATE/DELETE/TRUNCATE, regardless of role |
+
+We implemented triggers. Separate DB roles go on the "with more time" list
+(Neon's free tier gives one owner role, which is another reason the hash chain
+below matters).
+
+**The test-cleanup lesson:** our own test suite couldn't `TRUNCATE` the table
+anymore. The table **owner** can `ALTER TABLE … DISABLE TRIGGER USER`, which is
+fine for wiping a test DB, but it proves that **triggers alone don't stop the
+owner**. Hence…
+
+### 6.4 Tamper-evident: the hash chain
+
+Each event stores:
+
+```
+hash = sha256(prev_hash | claim_id | seq | event_type | … | details | created_at)
+```
+
+where `prev_hash` is the previous event's hash for the same claim (the first
+event links to 64 zeros, the "genesis"). It's the same idea behind blockchains
+and git commits.
+
+| Attack | What breaks | Caught? |
+|---|---|---|
+| Edit an event's contents | its stored hash ≠ recomputed hash | ✅ that seq |
+| Delete an event | `seq` gap / next `prev_hash` doesn't match | ✅ |
+| Edit an event **and** recompute its hash | the **next** event still points at the old hash | ✅ the next seq |
+| Rewrite the **entire** chain consistently | nothing internal | ❌ needs **anchoring** |
+
+All of these are tested in `tests/test_audit_api.py` ("insider" disables the
+triggers, tampers, re-enables).
+
+**Anchoring (the honest limit):** someone with full DB control could recompute
+every hash from the edit onward. Real systems periodically publish the latest
+hash somewhere outside their control (another system, a signed log, even a
+newspaper in the old days). Say this before the interviewer does.
+
+**Design choice: the database computes the hash.** A `BEFORE INSERT` trigger
+assigns `seq`, `prev_hash`, `created_at` and `hash`; `verify_audit_chain()`
+recomputes using the **same** SQL function. There's one implementation, so the
+app and DB can't disagree on formatting. Two details make it deterministic:
+`jsonb::text` has a canonical key order, and `created_at` is formatted in
+**UTC** so the session time zone can't change the hash.
+
+**Concurrency:** `seq = max(seq) + 1` would race if two events for the same claim
+were inserted concurrently, but every write for a claim happens under the
+**claim row lock** (`SELECT … FOR UPDATE`, Phase 2). `UNIQUE(claim_id, seq)` is
+the backstop.
+
+### 6.5 Migrating a table that already has data
+
+Autogenerate produced `add_column(..., nullable=False)`, which **fails on a
+table with rows**. The safe, standard pattern:
+1. add the columns **nullable**
+2. **backfill** existing rows (here: compute seq and the hash chain in a
+   PL/pgSQL loop, *before* the append-only trigger exists, or it would block the
+   UPDATEs)
+3. `ALTER … SET NOT NULL`
+4. create constraints and triggers
+
+Tested both ways: `downgrade -1` then `upgrade head`.
+
+### 6.6 The explanation endpoint
+
+`GET /claims/{id}/explanation` answers "why?" **from the audit log only**, so it
+reflects what was recorded at decision time, not today's tables:
+- finds the latest decision event (`CLAIM_ADJUDICATED` / `CLAIM_PENDED`) and its
+  correlation id
+- per line, the **last rule evaluated** is the decisive one (short-circuit!), so
+  it returns that rule, its CARC + description, message, **inputs**, and the
+  rules the line passed before it
+- claim-level Eligibility denial → explains every line
+- REJECTED claim → lists the failed validation edits
+
+Example summary:
+`DENIED: 1 denied; line 1 (72148) denied by PriorAuth: CO-197 Precertification/authorization absent`
+
+The logic lives in a pure function (`domain/explanation.py`), so it's tested
+without a DB.
+
+### 6.7 New endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /claims/{id}/audit` | Full ordered trail with hashes |
+| `GET /claims/{id}/audit/verify` | `{valid, event_count, first_invalid_seq}` |
+| `GET /claims/{id}/explanation` | Human-readable "why" per line |
+
+### Phase 6: questions
+
+**Q6.1 (interview).** How do you make an audit log append-only, and why isn't
+"the app never updates it" enough?
+
+<details><summary>Answer</summary>
+
+The app is only one writer: scripts, other services, migrations and humans with
+SQL access aren't bound by app code. Enforce it in the **database**: triggers
+that reject UPDATE/DELETE/TRUNCATE (what anyone may do), plus
+**least-privilege roles** where the app can only INSERT/SELECT (who may do it).
+
+</details>
+
+**Q6.2 (interview).** The table owner can disable triggers. How do you detect
+tampering anyway?
+
+<details><summary>Answer</summary>
+
+A **hash chain**: each event stores `sha256(previous hash + its own contents)`.
+Editing an event changes its hash; recomputing that hash breaks the next
+event's `prev_hash` link; deleting one leaves a `seq` gap. A verify function
+recomputes the chain and reports the first bad event. Limit: rewriting the whole
+chain consistently isn't detectable internally; you need **anchoring** (publish
+the latest hash outside your control).
+
+</details>
+
+**Q6.3 (interview).** Why store one row per rule evaluation instead of one
+event with a JSON trace?
+
+<details><summary>Answer</summary>
+
+Columns make the log **queryable and indexable** ("all PriorAuth denials this
+week", "denial rate by rule") with plain SQL; each row is individually
+hash-chained, and the explanation can pick the exact decisive row. JSON blobs
+are fine for variable detail (we keep rule `inputs` in JSONB) but bad for the
+fields you filter and aggregate on.
+
+</details>
+
+**Q6.4 (interview).** How does your system answer "why was this claim denied?"
+
+<details><summary>Answer</summary>
+
+`GET /claims/{id}/explanation`, built only from the audit log. Find the latest
+adjudication run (by correlation id); for each line the **last rule evaluated**
+decided it (because of short-circuiting). Return that rule, its CARC and
+description, its message, the **inputs** it saw (e.g. "auths on file: none"), and
+the rules the line passed first. Rejected claims list their failed edits instead.
+
+</details>
+
+**Q6.5 (interview).** How do you add a NOT NULL column to a table that already
+has millions of rows?
+
+<details><summary>Answer</summary>
+
+Never in one step: (1) add it **nullable**, (2) **backfill** (in batches for big
+tables, to avoid long locks), (3) `SET NOT NULL`, (4) add constraints/triggers.
+Here the backfill also had to run **before** the append-only trigger existed. On
+very large tables you'd also consider `NOT VALID` constraints validated later.
+
+</details>
+
+**Q6.6 (bonus).** Why does the database compute the hash, not the application?
+
+<details><summary>Answer</summary>
+
+**One implementation**: the insert trigger and the verifier call the same SQL
+function, so there's no risk of Python and SQL formatting a timestamp or JSON
+differently. It also covers events inserted by anything, not just our app.
+Determinism details: `jsonb::text` has canonical key order, and `created_at`
+is formatted in UTC so the session time zone can't change the result.
+
+</details>
+
+**Q6.7 (bonus).** What's a correlation id and why did you add one?
+
+<details><summary>Answer</summary>
+
+An id shared by every event written in one operation (one validation, one
+adjudication run). It groups related rows, lets the explanation find "the
+latest adjudication run" when a claim was re-adjudicated (pend → approve, or
+appeal), and is the same idea used for tracing requests across services.
+
+</details>
+
+**Q6.8 (bonus).** `seq = max(seq) + 1` in a trigger looks racy. Why is it safe
+here?
+
+<details><summary>Answer</summary>
+
+Every write for a claim happens while holding that claim's row lock
+(`SELECT … FOR UPDATE`), so two transactions can't insert events for the same
+claim concurrently. `UNIQUE(claim_id, seq)` is the backstop: if it ever did
+race, one insert fails instead of corrupting the chain.
+
+</details>
+
+**Q6.9 (bonus).** Privileges vs triggers: what does each protect against?
+
+<details><summary>Answer</summary>
+
+**Privileges** control *who* may perform an operation (the app role can't
+UPDATE/DELETE audit rows). **Triggers** control *what* may happen to the table
+for everyone, including roles that do have privileges. The owner can bypass
+both (re-grant, disable triggers), which is why tamper **evidence** (the hash
+chain) complements tamper **prevention**.
+
+</details>
+
+---
+
 ## Glossary
 
 | Term | Meaning |
@@ -1539,6 +1785,9 @@ check happens to run first, and passes or fails for the wrong reason.
 | **Adjudication** | The payer deciding whether and how much to pay on a claim |
 | **Allowed amount** | The contracted price for a service; the most anyone pays |
 | **Atomicity** | All writes in a transaction succeed together or none do |
+| **Anchoring** | Publishing a hash-chain head outside your control so even a full rewrite is detectable |
+| **Append-only** | Rows can be inserted and read, never updated or deleted |
+| **Backfill** | Filling a new column for existing rows during a migration |
 | **Balancing** | Remittance rule: billed − adjustments = paid; patient responsibility = PR adjustments |
 | **CARC** | Claim Adjustment Reason Code (e.g. `CO-45`) explaining unpaid dollars |
 | **Accumulator** | Running total of what a member has paid toward the yearly deductible and out-of-pocket max |
@@ -1547,8 +1796,10 @@ check happens to run first, and passes or fails for the wrong reason.
 | **Coinsurance** | Percentage of cost the patient pays after the deductible |
 | **Edit** | A front-end validation check; failing one rejects the claim |
 | **Defense in depth** | Enforcing a rule at several layers (app + database) so one failure doesn't break it |
+| **Correlation id** | Id shared by all events from one operation, to group and trace them |
 | **Deadlock** | Two transactions each waiting for a lock the other holds; prevented by a consistent lock order |
 | **Fee schedule** | Contracted price per procedure (the basis of the allowed amount) |
+| **Least privilege** | Give each role only the permissions it needs (app: INSERT/SELECT on audit) |
 | **Luhn check digit** | A final digit computed from the others to catch typos (NPIs, credit cards) |
 | **Pessimistic locking** | Lock a row before changing it (`SELECT … FOR UPDATE`) so concurrent changes run one at a time |
 | **Optimistic locking** | Don't lock; detect a concurrent change via a version column and retry |
@@ -1556,6 +1807,7 @@ check happens to run first, and passes or fails for the wrong reason.
 | **Strategy pattern** | Interchangeable objects sharing one interface (our rules), chosen/ordered at runtime |
 | **State machine** | Finite set of states + a table of legal transitions; everything else is illegal |
 | **Trigger** | Database function that runs automatically on INSERT/UPDATE/DELETE; we use one to enforce transitions |
+| **Tamper-evident** | Changes can't be prevented by everyone, but are always detectable |
 | **Timely filing** | Deadline for submitting a claim after the date of service |
 | **Copay** | Flat fee per service (e.g. $25 office visit) |
 | **CPT** | Procedure codes (the *what*); AMA-copyrighted |
@@ -1564,6 +1816,7 @@ check happens to run first, and passes or fails for the wrong reason.
 | **EOB** | Explanation of Benefits, the member-facing remittance |
 | **ERA / 835** | Electronic remittance advice sent to the provider |
 | **HATEOAS** | REST idea: responses tell the client what it can do next (our `allowed_actions`) |
+| **Hash chain** | Each record stores a hash of the previous one + itself, making edits detectable |
 | **ICD-10-CM** | Diagnosis codes (the *why*); public domain |
 | **Idempotency** | Repeating a request has the same effect as sending it once |
 | **Manual pricing** | A covered service with no contracted rate; a human sets the price (we PEND it) |

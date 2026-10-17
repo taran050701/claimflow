@@ -16,6 +16,7 @@ from decimal import Decimal
 from enum import StrEnum
 
 from claimflow.domain.adjudication import LineOutcome
+from claimflow.domain.carc import describe
 
 ZERO = Decimal("0.00")
 
@@ -23,21 +24,6 @@ ZERO = Decimal("0.00")
 class GroupCode(StrEnum):
     CO = "CO"  # contractual obligation: provider writes it off
     PR = "PR"  # patient responsibility: provider bills the patient
-
-
-# Short descriptions of the CARCs we use (the standard list is published by X12).
-CARC_DESCRIPTIONS = {
-    "1": "Deductible amount",
-    "2": "Coinsurance amount",
-    "3": "Co-payment amount",
-    "18": "Exact duplicate claim/service",
-    "26": "Expenses incurred prior to coverage",
-    "27": "Expenses incurred after coverage terminated",
-    "45": "Charge exceeds fee schedule/maximum allowable",
-    "96": "Non-covered charge(s)",
-    "151": "Information does not support this many/frequency of services",
-    "197": "Precertification/authorization absent",
-}
 
 
 class ClaimStatusCode(StrEnum):
@@ -119,7 +105,7 @@ class RemittanceImbalanceError(Exception):
 
 
 def _adj(group: GroupCode, carc: str, amount: Decimal) -> Adjustment:
-    return Adjustment(group, carc, amount, CARC_DESCRIPTIONS.get(carc, ""))
+    return Adjustment(group, carc, amount, describe(carc))
 
 
 def line_adjustments(line: LineForRemit) -> tuple[Adjustment, ...]:

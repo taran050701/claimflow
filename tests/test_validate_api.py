@@ -62,11 +62,15 @@ def test_validation_writes_audit_event_with_transition(client, claim_payload):
             .order_by(AuditEvent.id)
         ).all()
 
-    assert [(e.event_type, e.from_status, e.to_status) for e in events] == [
-        ("CLAIM_RECEIVED", None, "RECEIVED"),
-        ("CLAIM_REJECTED", "RECEIVED", "REJECTED"),
+    assert [
+        (e.event_type, e.rule_name, e.reason_code, e.from_status, e.to_status) for e in events
+    ] == [
+        ("CLAIM_RECEIVED", None, None, None, "RECEIVED"),
+        ("VALIDATION_EDIT_FAILED", "MEMBER_NOT_FOUND", "31", None, None),  # one row per edit
+        ("CLAIM_REJECTED", None, None, "RECEIVED", "REJECTED"),
     ]
-    assert events[1].details["issues"][0]["edit_code"] == "MEMBER_NOT_FOUND"
+    # The validation run's events share one correlation id; submission had its own.
+    assert events[1].correlation_id == events[2].correlation_id != events[0].correlation_id
 
 
 def test_validating_twice_is_409(client, claim_payload):

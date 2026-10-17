@@ -143,20 +143,29 @@ def test_cannot_adjudicate_twice(client, claim_payload):
     assert client.post(f"/claims/{claim_id}/adjudicate").status_code == 409
 
 
-def test_audit_event_records_full_rule_trace(client, claim_payload):
+def test_every_rule_evaluation_is_its_own_audit_row(client, claim_payload):
     claim_id = submit_and_validate(client, claim_payload)
     adjudicate(client, claim_id)
 
     with SessionLocal() as s:
-        event = s.scalars(
-            select(AuditEvent).where(
-                AuditEvent.claim_id == uuid.UUID(claim_id),
-                AuditEvent.event_type == "CLAIM_ADJUDICATED",
-            )
-        ).one()
+        events = s.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.claim_id == uuid.UUID(claim_id))
+            .order_by(AuditEvent.seq)
+        ).all()
 
-    assert (event.from_status, event.to_status) == ("VALIDATED", "ADJUDICATED")
-    rules = [(t["rule"], t["line_number"]) for t in event.details["trace"]]
-    assert rules[0] == ("Eligibility", None)
-    assert ("Pricing", 1) in rules and ("Pricing", 2) in rules
-    assert "accumulators_before" in event.details and "accumulators_after" in event.details
+    rules = [
+        (e.rule_name, e.line_number, e.outcome) for e in events if e.event_type == "RULE_EVALUATED"
+    ]
+    per_line = ["Coverage", "CodeEdits", "PriorAuth", "Duplicate", "Pricing"]
+    assert rules == [("Eligibility", None, "PASS")] + [
+        (rule, line, "PASS") for line in (1, 2) for rule in per_line
+    ]
+    status_event = events[-1]
+    assert (status_event.event_type, status_event.from_status, status_event.to_status) == (
+        "CLAIM_ADJUDICATED",
+        "VALIDATED",
+        "ADJUDICATED",
+    )
+    assert status_event.details["rules_evaluated"] == 11
+    assert "accumulators_after" in status_event.details

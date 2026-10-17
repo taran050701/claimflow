@@ -56,8 +56,11 @@ def statuses_in_audit_log(claim_id: str) -> list[tuple[str | None, str]]:
     with SessionLocal() as s:
         events = s.scalars(
             select(AuditEvent)
-            .where(AuditEvent.claim_id == uuid.UUID(claim_id))
-            .order_by(AuditEvent.id)
+            .where(
+                AuditEvent.claim_id == uuid.UUID(claim_id),
+                AuditEvent.to_status.is_not(None),  # state changes only, not rule rows
+            )
+            .order_by(AuditEvent.seq)
         )
         return [(e.from_status, e.to_status) for e in events]
 

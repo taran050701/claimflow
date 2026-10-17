@@ -8,7 +8,16 @@ from sqlalchemy.orm import Session
 
 from claimflow.db import get_session
 from claimflow.domain.enums import ClaimStatus
-from claimflow.schemas import AppealIn, ClaimIn, ClaimOut, ClaimPage, RemittanceOut
+from claimflow.schemas import (
+    AppealIn,
+    AuditEventOut,
+    AuditVerificationOut,
+    ClaimIn,
+    ClaimOut,
+    ClaimPage,
+    ExplanationOut,
+    RemittanceOut,
+)
 from claimflow.services.claim_service import ClaimService
 
 router = APIRouter(prefix="/claims", tags=["claims"])
@@ -107,6 +116,34 @@ def get_remittance(claim_id: uuid.UUID, service: ServiceDep) -> RemittanceOut:
     dollar. Always balances: billed - adjustments = paid."""
     remit = service.remittance(claim_id)
     return RemittanceOut.model_validate({**remit.__dict__, "claim_id": claim_id})
+
+
+@router.get("/{claim_id}/explanation", response_model=ExplanationOut)
+def explain_claim(claim_id: uuid.UUID, service: ServiceDep) -> ExplanationOut:
+    """Why was this claim decided this way? Per line: the decisive rule, reason code,
+    message and the inputs that rule saw. Built only from the audit log."""
+    explanation = service.explain(claim_id)
+    return ExplanationOut.model_validate({**explanation.__dict__, "claim_id": claim_id})
+
+
+@router.get("/{claim_id}/audit", response_model=list[AuditEventOut])
+def get_audit_trail(claim_id: uuid.UUID, service: ServiceDep) -> list[AuditEventOut]:
+    """Every recorded event for the claim, in order: state changes, failed validation
+    edits, and each rule evaluation with its inputs. Append-only and hash-chained."""
+    return [AuditEventOut.model_validate(e) for e in service.audit_trail(claim_id)]
+
+
+@router.get("/{claim_id}/audit/verify", response_model=AuditVerificationOut)
+def verify_audit_trail(claim_id: uuid.UUID, service: ServiceDep) -> AuditVerificationOut:
+    """Recompute the claim's hash chain in the database. Any edited, deleted or
+    reordered event makes it invalid and points at the first broken one."""
+    count, first_invalid = service.verify_audit_trail(claim_id)
+    return AuditVerificationOut(
+        claim_id=claim_id,
+        valid=first_invalid is None,
+        event_count=count,
+        first_invalid_seq=first_invalid,
+    )
 
 
 @router.get("", response_model=ClaimPage)

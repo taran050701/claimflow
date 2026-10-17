@@ -12,7 +12,7 @@ rejected with reasons in Phase 2, like an X12 277CA.
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
@@ -156,3 +156,67 @@ class RemittanceOut(BaseModel):
     date_of_service: date
     totals: RemitTotalsOut
     lines: list[RemitLineOut]
+
+
+# ---------------------------------------------------------------- audit
+
+
+class AuditEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    seq: int
+    created_at: datetime
+    event_type: str
+    correlation_id: uuid.UUID | None
+    from_status: str | None
+    to_status: str | None
+    rule_name: str | None
+    line_number: int | None
+    outcome: str | None
+    reason_code: str | None
+    details: dict[str, Any]
+    prev_hash: str
+    hash: str
+
+
+class AuditVerificationOut(BaseModel):
+    claim_id: uuid.UUID
+    valid: bool
+    event_count: int
+    first_invalid_seq: int | None = Field(
+        description="First event whose hash, link or sequence doesn't check out; null if valid"
+    )
+
+
+class LineExplanationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    line_number: int
+    procedure_code: str
+    outcome: str
+    decided_by: str
+    reason_code: str | None
+    reason: str
+    message: str
+    inputs: dict[str, Any]
+    rules_passed: list[str]
+
+
+class ValidationFailureOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    edit_code: str
+    line_number: int | None
+    reason_code: str | None
+    reason: str
+    message: str
+
+
+class ExplanationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    claim_id: uuid.UUID
+    status: str
+    summary: str
+    lines: list[LineExplanationOut]
+    validation_failures: list[ValidationFailureOut]

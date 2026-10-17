@@ -15,11 +15,11 @@ which rule decided what, and why.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 from claimflow.domain.pricing import Accumulators, LinePricing, PlanTerms, price_line
 from claimflow.domain.validation import ClaimInput, LineInput
@@ -115,6 +115,8 @@ class RuleResult:
     message: str
     carc: str | None = None
     line_number: int | None = None  # None = claim-level rule
+    # The facts this rule looked at, so the audit log can show WHY, not just WHAT.
+    inputs: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def passed(self) -> bool:
@@ -147,16 +149,27 @@ class AdjudicationResult:
 # ---------------------------------------------------------------- rules
 
 
-def _pass(rule: str, line: LineInput | None, message: str) -> RuleResult:
-    return RuleResult(rule, Verdict.PASS, message, None, line.line_number if line else None)
+Inputs = dict[str, Any]
 
 
-def _deny(rule: str, line: LineInput | None, carc: str, message: str) -> RuleResult:
-    return RuleResult(rule, Verdict.DENY, message, carc, line.line_number if line else None)
+def _pass(rule: str, line: LineInput | None, message: str, inputs: Inputs) -> RuleResult:
+    return RuleResult(rule, Verdict.PASS, message, None, _num(line), inputs)
 
 
-def _pend(rule: str, line: LineInput | None, message: str) -> RuleResult:
-    return RuleResult(rule, Verdict.PEND, message, None, line.line_number if line else None)
+def _deny(rule: str, line: LineInput | None, carc: str, message: str, inputs: Inputs) -> RuleResult:
+    return RuleResult(rule, Verdict.DENY, message, carc, _num(line), inputs)
+
+
+def _pend(rule: str, line: LineInput | None, message: str, inputs: Inputs) -> RuleResult:
+    return RuleResult(rule, Verdict.PEND, message, None, _num(line), inputs)
+
+
+def _num(line: LineInput | None) -> int | None:
+    return line.line_number if line else None
+
+
+def _money(value: Decimal | None) -> str | None:
+    return None if value is None else str(value)
 
 
 class EligibilityRule:
@@ -166,12 +179,23 @@ class EligibilityRule:
 
     def evaluate(self, ctx: AdjudicationContext) -> RuleResult:
         dos = ctx.claim.date_of_service
+        inputs = {
+            "date_of_service": dos.isoformat(),
+            "coverage_spans": [
+                {
+                    "plan_id": s.plan_id,
+                    "start_date": s.start_date.isoformat(),
+                    "end_date": s.end_date.isoformat() if s.end_date else None,
+                }
+                for s in ctx.coverage_spans
+            ],
+        }
         span = find_coverage(ctx.coverage_spans, dos)
         if span is not None:
-            return _pass(self.name, None, f"Covered by {span.plan_id} on {dos}")
+            return _pass(self.name, None, f"Covered by {span.plan_id} on {dos}", inputs)
         if any(s.end_date is not None and s.end_date < dos for s in ctx.coverage_spans):
-            return _deny(self.name, None, "27", f"Coverage terminated before {dos}")
-        return _deny(self.name, None, "26", f"Coverage not yet in effect on {dos}")
+            return _deny(self.name, None, "27", f"Coverage terminated before {dos}", inputs)
+        return _deny(self.name, None, "26", f"Coverage not yet in effect on {dos}", inputs)
 
 
 class LineRule(Protocol):
@@ -187,9 +211,21 @@ class CoverageRule:
 
     def evaluate(self, line: LineInput, ctx: AdjudicationContext) -> RuleResult:
         benefit = ctx.benefits.get(line.procedure_code)
+        inputs = {
+            "procedure_code": line.procedure_code,
+            "benefit": None
+            if benefit is None
+            else {
+                "covered": benefit.covered,
+                "requires_prior_auth": benefit.requires_prior_auth,
+                "copay": _money(benefit.copay),
+            },
+        }
         if benefit is None or not benefit.covered:
-            return _deny(self.name, line, "96", f"{line.procedure_code} is not a covered benefit")
-        return _pass(self.name, line, f"{line.procedure_code} is covered")
+            return _deny(
+                self.name, line, "96", f"{line.procedure_code} is not a covered benefit", inputs
+            )
+        return _pass(self.name, line, f"{line.procedure_code} is covered", inputs)
 
 
 class CodeEditsRule:
@@ -200,14 +236,19 @@ class CodeEditsRule:
 
     def evaluate(self, line: LineInput, ctx: AdjudicationContext) -> RuleResult:
         fee = ctx.fee_schedule.get(line.procedure_code)
+        inputs = {
+            "units": line.units,
+            "max_units_per_day": fee.max_units_per_day if fee else None,
+        }
         if fee is not None and line.units > fee.max_units_per_day:
             return _deny(
                 self.name,
                 line,
                 "151",
                 f"{line.units} units exceeds the daily limit of {fee.max_units_per_day}",
+                inputs,
             )
-        return _pass(self.name, line, "Within unit limits")
+        return _pass(self.name, line, "Within unit limits", inputs)
 
 
 class PriorAuthRule:
@@ -218,7 +259,7 @@ class PriorAuthRule:
     def evaluate(self, line: LineInput, ctx: AdjudicationContext) -> RuleResult:
         benefit = ctx.benefits[line.procedure_code]  # CoverageRule guarantees it exists
         if not benefit.requires_prior_auth:
-            return _pass(self.name, line, "No authorization required")
+            return _pass(self.name, line, "No authorization required", {"required": False})
 
         dos = ctx.claim.date_of_service
         auths = [
@@ -226,11 +267,27 @@ class PriorAuthRule:
             for a in ctx.prior_auths
             if a.procedure_code == line.procedure_code and a.valid_from <= dos <= a.valid_to
         ]
+        inputs = {
+            "required": True,
+            "date_of_service": dos.isoformat(),
+            # Every auth for this code, so the log shows what was considered and why it
+            # didn't count (wrong dates, wrong status).
+            "auths_on_file": [
+                {
+                    "auth_number": a.auth_number,
+                    "status": a.status,
+                    "valid_from": a.valid_from.isoformat(),
+                    "valid_to": a.valid_to.isoformat(),
+                }
+                for a in ctx.prior_auths
+                if a.procedure_code == line.procedure_code
+            ],
+        }
         if any(a.status is AuthStatus.APPROVED for a in auths):
-            return _pass(self.name, line, "Approved authorization on file")
+            return _pass(self.name, line, "Approved authorization on file", inputs)
         if any(a.status is AuthStatus.PENDING for a in auths):
-            return _pend(self.name, line, "Authorization request is still under review")
-        return _deny(self.name, line, "197", "Required prior authorization is absent")
+            return _pend(self.name, line, "Authorization request is still under review", inputs)
+        return _deny(self.name, line, "197", "Required prior authorization is absent", inputs)
 
 
 class DuplicateRule:
@@ -239,14 +296,20 @@ class DuplicateRule:
     name = "Duplicate"
 
     def evaluate(self, line: LineInput, ctx: AdjudicationContext) -> RuleResult:
+        inputs = {
+            "procedure_code": line.procedure_code,
+            "date_of_service": ctx.claim.date_of_service.isoformat(),
+            "already_processed_codes": sorted(ctx.already_processed),
+        }
         if line.procedure_code in ctx.already_processed:
             return _deny(
                 self.name,
                 line,
                 "18",
                 f"{line.procedure_code} on {ctx.claim.date_of_service} was already processed",
+                inputs,
             )
-        return _pass(self.name, line, "Not a duplicate")
+        return _pass(self.name, line, "Not a duplicate", inputs)
 
 
 # Order matters: cheap, decisive checks first; pricing only for lines that pass all.
@@ -304,6 +367,7 @@ def adjudicate(ctx: AdjudicationContext) -> AdjudicationResult:
                 break
 
         if decision is None:
+            acc_before = acc
             decision, acc = _price(line, ctx, acc)
             trace.append(
                 RuleResult(
@@ -312,6 +376,7 @@ def adjudicate(ctx: AdjudicationContext) -> AdjudicationResult:
                     decision.message,
                     None,
                     line.line_number,
+                    _pricing_inputs(line, ctx, acc_before, decision.pricing),
                 )
             )
         decisions.append(decision)
@@ -364,3 +429,31 @@ def _price(
         ),
         acc,
     )
+
+
+def _pricing_inputs(
+    line: LineInput, ctx: AdjudicationContext, acc: Accumulators, pricing: LinePricing | None
+) -> Inputs:
+    fee = ctx.fee_schedule.get(line.procedure_code)
+    terms = ctx.plan_terms
+    inputs: Inputs = {
+        "billed": _money(line.billed_amount),
+        "units": line.units,
+        "rate_per_unit": _money(fee.rate_per_unit) if fee else None,
+        "copay": _money(ctx.benefits[line.procedure_code].copay),
+        "annual_deductible": _money(terms.annual_deductible) if terms else None,
+        "coinsurance_rate": _money(terms.coinsurance_rate) if terms else None,
+        "out_of_pocket_max": _money(terms.out_of_pocket_max) if terms else None,
+        "deductible_met_before": _money(acc.deductible_met),
+        "out_of_pocket_met_before": _money(acc.out_of_pocket_met),
+    }
+    if pricing:
+        inputs["result"] = {
+            "allowed": _money(pricing.allowed),
+            "deductible": _money(pricing.deductible),
+            "copay": _money(pricing.copay),
+            "coinsurance": _money(pricing.coinsurance),
+            "patient_responsibility": _money(pricing.patient_responsibility),
+            "paid": _money(pricing.paid),
+        }
+    return inputs

@@ -24,6 +24,7 @@ from claimflow.domain.errors import (
     IdempotencyKeyConflictError,
     RemittanceNotAvailableError,
 )
+from claimflow.domain.explanation import AuditRecord, Explanation, explain
 from claimflow.domain.pricing import Accumulators
 from claimflow.domain.remittance import LineForRemit, Remittance, build_remittance
 from claimflow.domain.state_machine import assert_action_allowed, assert_transition
@@ -59,6 +60,8 @@ class ClaimService:
         self.audit = AuditRepository(session)
         self.reference = ReferenceRepository(session)
         self.adjudication = AdjudicationRepository(session)
+        # Shared by every audit event one operation writes (e.g. one adjudication run).
+        self._correlation_id: uuid.UUID | None = None
 
     def submit(self, claim_in: ClaimIn, idempotency_key: str | None = None) -> tuple[Claim, bool]:
         """Store a new claim in RECEIVED status.
@@ -67,6 +70,7 @@ class ClaimService:
         earlier request with the same Idempotency-Key.
         """
         request_hash = _request_hash(claim_in)
+        self._correlation_id = uuid.uuid4()
 
         if idempotency_key is not None:
             existing = self.claims.get_by_idempotency_key(idempotency_key)
@@ -96,17 +100,11 @@ class ClaimService:
         try:
             self.claims.add(claim)
             self.session.flush()  # sends the INSERTs, so claim.id is set for the audit row
-            self.audit.add(
-                AuditEvent(
-                    claim_id=claim.id,
-                    event_type=AuditEventType.CLAIM_RECEIVED,
-                    from_status=None,
-                    to_status=ClaimStatus.RECEIVED,
-                    details={
-                        "line_count": len(claim.lines),
-                        "total_billed": str(claim.total_billed),
-                    },
-                )
+            self._record(
+                claim,
+                AuditEventType.CLAIM_RECEIVED,
+                to_status=ClaimStatus.RECEIVED,
+                details={"line_count": len(claim.lines), "total_billed": str(claim.total_billed)},
             )
             self.session.commit()
         except IntegrityError:
@@ -139,16 +137,21 @@ class ClaimService:
             )
             for i in issues
         )
+        for i in issues:
+            self._record(
+                claim,
+                AuditEventType.VALIDATION_EDIT_FAILED,
+                rule_name=i.edit_code,
+                line_number=i.line_number,
+                outcome="FAIL",
+                reason_code=i.carc,
+                details={"field": i.field, "message": i.message},
+            )
         self._transition(
             claim,
             ClaimStatus.REJECTED if issues else ClaimStatus.VALIDATED,
             AuditEventType.CLAIM_REJECTED if issues else AuditEventType.CLAIM_VALIDATED,
-            {
-                "issues": [
-                    {"edit_code": i.edit_code, "carc": i.carc, "line_number": i.line_number}
-                    for i in issues
-                ]
-            },
+            {"issue_count": len(issues)},
         )
         self.session.commit()
         return claim
@@ -175,6 +178,18 @@ class ClaimService:
             accumulator.deductible_met = result.accumulators_after.deductible_met
             accumulator.out_of_pocket_met = result.accumulators_after.out_of_pocket_met
 
+        # One audit row per rule evaluation: which rule, which line, what it decided,
+        # why (reason code + message) and what it looked at (inputs).
+        for r in result.trace:
+            self._record(
+                claim,
+                AuditEventType.RULE_EVALUATED,
+                rule_name=r.rule,
+                line_number=r.line_number,
+                outcome=r.verdict,
+                reason_code=r.carc,
+                details={"message": r.message, "inputs": dict(r.inputs)},
+            )
         self._transition(
             claim,
             ClaimStatus(result.outcome),
@@ -182,16 +197,7 @@ class ClaimService:
             if result.outcome is ClaimOutcome.ADJUDICATED
             else AuditEventType.CLAIM_PENDED,
             {
-                "trace": [
-                    {
-                        "rule": r.rule,
-                        "line_number": r.line_number,
-                        "verdict": r.verdict,
-                        "carc": r.carc,
-                        "message": r.message,
-                    }
-                    for r in result.trace
-                ],
+                "rules_evaluated": len(result.trace),
                 "accumulators_before": _accumulators_json(ctx.accumulators),
                 "accumulators_after": _accumulators_json(result.accumulators_after),
             },
@@ -243,6 +249,38 @@ class ClaimService:
             lines=tuple(_to_line_for_remit(line) for line in claim.lines),
         )
 
+    # ------------------------------------------------------------ audit queries
+
+    def audit_trail(self, claim_id: uuid.UUID) -> list[AuditEvent]:
+        self.get(claim_id)  # 404 if the claim doesn't exist
+        return self.audit.list_for_claim(claim_id)
+
+    def verify_audit_trail(self, claim_id: uuid.UUID) -> tuple[int, int | None]:
+        """Returns (event_count, first_invalid_seq). first_invalid_seq is None
+        when the hash chain is intact."""
+        events = self.audit_trail(claim_id)
+        return len(events), self.audit.first_invalid_seq(claim_id)
+
+    def explain(self, claim_id: uuid.UUID) -> Explanation:
+        """Why was this claim decided this way? Built from audit records only."""
+        claim = self.get(claim_id)
+        records = [
+            AuditRecord(
+                seq=e.seq,
+                event_type=e.event_type,
+                to_status=e.to_status,
+                rule_name=e.rule_name,
+                line_number=e.line_number,
+                outcome=e.outcome,
+                reason_code=e.reason_code,
+                correlation_id=e.correlation_id,
+                details=e.details,
+            )
+            for e in self.audit.list_for_claim(claim_id)
+        ]
+        codes = {line.line_number: line.procedure_code for line in claim.lines}
+        return explain(claim.status, codes, records)
+
     # ------------------------------------------------------------ state helpers
 
     def _load_for_action(self, claim_id: uuid.UUID, action: str) -> Claim:
@@ -252,6 +290,7 @@ class ClaimService:
         if claim is None:
             raise ClaimNotFoundError(claim_id)
         assert_action_allowed(claim.status, action)
+        self._correlation_id = uuid.uuid4()
         return claim
 
     def _transition(
@@ -260,16 +299,38 @@ class ClaimService:
         """The ONLY place a claim's status changes. Checks the transition table,
         changes the status, and records the audit event, every time."""
         assert_transition(claim.status, target)
+        self._record(claim, event_type, from_status=claim.status, to_status=target, details=details)
+        claim.status = target
+
+    def _record(
+        self,
+        claim: Claim,
+        event_type: AuditEventType,
+        *,
+        from_status: str | None = None,
+        to_status: str | None = None,
+        rule_name: str | None = None,
+        line_number: int | None = None,
+        outcome: str | None = None,
+        reason_code: str | None = None,
+        details: dict | None = None,
+    ) -> None:
+        """Append one audit event. The database assigns seq, created_at and the
+        hash-chain columns, and refuses any later change to the row."""
         self.audit.add(
             AuditEvent(
                 claim_id=claim.id,
+                correlation_id=self._correlation_id,
                 event_type=event_type,
-                from_status=claim.status,
-                to_status=target,
-                details=details,
+                from_status=from_status,
+                to_status=to_status,
+                rule_name=rule_name,
+                line_number=line_number,
+                outcome=outcome,
+                reason_code=reason_code,
+                details=details or {},
             )
         )
-        claim.status = target
 
     def _adjudication_context(
         self, claim: Claim, claim_input: ClaimInput, accumulator: MemberAccumulator

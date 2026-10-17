@@ -7,7 +7,7 @@ in one place and makes them easy to change.
 
 import uuid
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from claimflow.domain.enums import ClaimStatus
@@ -67,3 +67,12 @@ class AuditRepository:
 
     def add(self, event: AuditEvent) -> None:
         self.session.add(event)
+
+    def list_for_claim(self, claim_id: uuid.UUID) -> list[AuditEvent]:
+        stmt = select(AuditEvent).where(AuditEvent.claim_id == claim_id).order_by(AuditEvent.seq)
+        return list(self.session.scalars(stmt))
+
+    def first_invalid_seq(self, claim_id: uuid.UUID) -> int | None:
+        """Ask the database to recompute the claim's hash chain (verify_audit_chain,
+        migration 0005). None = intact."""
+        return self.session.scalar(select(func.verify_audit_chain(claim_id)))

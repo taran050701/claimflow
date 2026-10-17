@@ -18,6 +18,8 @@ class ClaimStatus(StrEnum):
 
 class AuditEventType(StrEnum):
     CLAIM_RECEIVED = "CLAIM_RECEIVED"
+    VALIDATION_EDIT_FAILED = "VALIDATION_EDIT_FAILED"  # one row per failed edit
+    RULE_EVALUATED = "RULE_EVALUATED"  # one row per rule evaluation
     CLAIM_VALIDATED = "CLAIM_VALIDATED"
     CLAIM_REJECTED = "CLAIM_REJECTED"
     CLAIM_ADJUDICATED = "CLAIM_ADJUDICATED"

@@ -41,7 +41,15 @@ def clean_tables():
     """After each test: empty the claim tables and reset the mutable reference
     data (accumulators, auths), so tests can't affect each other."""
     yield
+    reset_test_data()
+
+
+def reset_test_data() -> None:
+    # audit_events is append-only: its triggers refuse TRUNCATE. The table OWNER can
+    # disable triggers, which is fine for wiping a test database (and is exactly why
+    # production also needs least-privilege roles and the hash chain).
     with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE audit_events DISABLE TRIGGER USER"))
         conn.execute(
             text(
                 "TRUNCATE audit_events, claim_line_adjudications, claim_validation_issues, "
@@ -49,6 +57,7 @@ def clean_tables():
                 "RESTART IDENTITY CASCADE"
             )
         )
+        conn.execute(text("ALTER TABLE audit_events ENABLE TRIGGER USER"))
 
 
 @pytest.fixture
