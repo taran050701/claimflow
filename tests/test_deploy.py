@@ -105,3 +105,9 @@ def test_root_redirects_to_swagger(client):
     assert resp.status_code == 307
     assert resp.headers["location"] == "/docs"
     assert client.get("/docs").status_code == 200
+
+
+def test_health_and_root_answer_head_requests(client):
+    """Uptime monitors and load balancers often probe with HEAD."""
+    assert client.head("/health").status_code == 200
+    assert client.head("/", follow_redirects=False).status_code == 307

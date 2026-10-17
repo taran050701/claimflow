@@ -2098,6 +2098,23 @@ and printed **non-JSON** log lines that production log search couldn't parse.
 Fixed before it ever reached Render. **Cheap rehearsal beats debugging a remote
 box.**
 
+### 8.5b Going live: what the first check found
+
+The first live check (read-only requests only: claims can never be deleted, so
+test writes would stay in the demo forever) passed everywhere except two spots:
+
+1. **`/stats` reported p50 adjudication latency of ~1,145 ms.** The demo data had
+   been loaded from a laptop, so each adjudication paid ~12 round trips across
+   the internet to the Ohio database, and those timings were **recorded in the
+   append-only audit log**. The design itself forbids editing them, so the fix
+   was to **reset the demo database and let the production server reload it from
+   inside Ohio**. Two lessons: *where a measurement is taken is part of the
+   measurement*, and *append-only means you fix history by replacing the whole
+   dataset deliberately, never by editing rows*.
+2. **`HEAD /` returned 405.** Uptime monitors and load balancers often probe with
+   `HEAD`; FastAPI's `@app.get` only answers `GET`. `/` and `/health` now accept
+   both.
+
 ### 8.6 The landing experience
 
 - `/` redirects to **Swagger** (`/docs`).
@@ -2114,7 +2131,7 @@ box.**
 
 <details><summary>Answer</summary>
 
-GitHub push → CI (lint, migrations, 163 tests) → Render deploys only if checks
+GitHub push → CI (lint, migrations, 164 tests) → Render deploys only if checks
 pass (`autoDeployTrigger: checksPass`) using `render.yaml`. Build: `uv sync
 --locked --no-dev`. Start: `alembic upgrade head` → idempotent demo seed →
 `exec uvicorn`. Render routes traffic once `/health` answers. The database is

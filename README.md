@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/taran050701/claimflow/actions/workflows/ci.yml/badge.svg)](https://github.com/taran050701/claimflow/actions/workflows/ci.yml)
 ![Python 3.13](https://img.shields.io/badge/python-3.13-blue)
-![Tests](https://img.shields.io/badge/tests-163%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-164%20passing-brightgreen)
 ![Coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)
 
 **A healthcare claims adjudication backend: what a health insurer's systems do
@@ -11,7 +11,7 @@ what to pay through an ordered rules engine, tracks every claim through a strict
 lifecycle, explains every dollar with industry reason codes, and keeps a
 tamper-evident audit trail of every decision.
 
-**▶ Live demo (Swagger UI): _link added after deployment_**
+**▶ Live demo: [claimflow-vpno.onrender.com](https://claimflow-vpno.onrender.com)** (opens the interactive Swagger UI)
 *(free hosting: the first request after idle takes ~30–60 s to wake the server)*
 
 ---
@@ -72,7 +72,7 @@ flowchart TB
     SVC --> VAL & ENG & SM & REM & EXP
     ENG --> PRC
     SVC --> REPO --> DB[("PostgreSQL on Neon<br/>CHECK constraints · transition trigger<br/>append-only, hash-chained audit log")]
-    GH["GitHub"] -->|push| CI["GitHub Actions<br/>lint · migrations · 163 tests"] -->|green| Render["Render auto-deploy"]
+    GH["GitHub"] -->|push| CI["GitHub Actions<br/>lint · migrations · 164 tests"] -->|green| Render["Render auto-deploy"]
 ```
 
 The **domain core never imports FastAPI or SQLAlchemy**: rules, pricing, the
@@ -151,7 +151,7 @@ uv run python -m scripts.demo_seed        # reference data + 11 demo claims
 uv run uvicorn claimflow.main:app --reload
 # open http://localhost:8000  (redirects to Swagger)
 
-uv run pytest                             # 163 tests against claimflow_test
+uv run pytest                             # 164 tests against claimflow_test
 ```
 
 ## API overview
@@ -174,7 +174,7 @@ Full interactive docs at `/docs`.
 
 ## Testing and quality
 
-- **163 tests, 99% coverage**, in three layers:
+- **164 tests, 99% coverage**, in three layers:
   - **pure unit tests** for validation, pricing, rules, the state machine, remittance and explanations (no DB)
   - **integration tests** through HTTP against real PostgreSQL
   - **property and attack tests**: state-graph reachability, money reconciliation, audit tamper scenarios, metric-cardinality guard

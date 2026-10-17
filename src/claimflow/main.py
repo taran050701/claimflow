@@ -77,7 +77,8 @@ def create_app() -> FastAPI:
     def _illegal_state(_: Request, exc: Exception) -> JSONResponse:
         return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)})
 
-    @app.get("/", include_in_schema=False)
+    # HEAD too: uptime monitors and load balancers often probe with HEAD.
+    @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
     def root() -> RedirectResponse:
         return RedirectResponse("/docs")
 
@@ -86,7 +87,7 @@ def create_app() -> FastAPI:
         """Prometheus scrape endpoint (text exposition format)."""
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-    @app.get("/health", tags=["ops"])
+    @app.api_route("/health", methods=["GET", "HEAD"], tags=["ops"])
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
