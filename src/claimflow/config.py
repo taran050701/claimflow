@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+psycopg://localhost:5432/claimflow"
+    log_level: str = "INFO"
+    # "json" for machines (production, log aggregators), "console" for humans (local dev).
+    log_format: str = "json"
 
 
 @lru_cache

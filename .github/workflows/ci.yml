@@ -1,0 +1,70 @@
+# Runs on every push to main and every pull request: lint, format, migrations,
+# and the full test suite against a real PostgreSQL 16 (same as production).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch cancels the older, now-irrelevant run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # least privilege: CI only needs to read the code
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: claimflow
+          POSTGRES_PASSWORD: claimflow
+          POSTGRES_DB: claimflow_test
+        ports: ["5432:5432"]
+        # Don't start the steps until Postgres accepts connections.
+        options: >-
+          --health-cmd "pg_isready -U claimflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg://claimflow:claimflow@localhost:5432/claimflow_test
+      TEST_DATABASE_URL: postgresql+psycopg://claimflow:claimflow@localhost:5432/claimflow_test
+
+    steps:
+      # Actions pinned to a commit SHA (tags can be moved; SHAs can't).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (exactly as locked)
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Migrations apply cleanly and match the models
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+
+      - name: Migrations are reversible
+        run: |
+          uv run alembic downgrade base
+          uv run alembic upgrade head
+
+      - name: Tests with coverage
+        run: uv run pytest --cov=claimflow --cov-report=term-missing --cov-fail-under=95

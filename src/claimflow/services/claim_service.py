@@ -4,9 +4,11 @@ one database transaction: everything it writes commits together or not at all.
 
 import hashlib
 import json
+import time
 import uuid
 from decimal import Decimal
 
+import structlog
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -29,6 +31,16 @@ from claimflow.domain.pricing import Accumulators
 from claimflow.domain.remittance import LineForRemit, Remittance, build_remittance
 from claimflow.domain.state_machine import assert_action_allowed, assert_transition
 from claimflow.domain.validation import ClaimInput, LineInput, ReferenceData, validate_claim
+from claimflow.metrics import (
+    ADJUDICATION_LATENCY,
+    ADJUDICATIONS,
+    APPEALS,
+    CLAIMS_FINALIZED,
+    CLAIMS_RECEIVED,
+    CLAIMS_VALIDATED,
+    LINE_DECISIONS,
+    VALIDATION_FAILURES,
+)
 from claimflow.models import (
     AuditEvent,
     Claim,
@@ -41,6 +53,8 @@ from claimflow.repositories.adjudication import AdjudicationRepository
 from claimflow.repositories.claims import AuditRepository, ClaimRepository
 from claimflow.repositories.reference import ReferenceRepository
 from claimflow.schemas import ClaimIn
+
+log = structlog.get_logger()
 
 
 def _request_hash(claim_in: ClaimIn) -> str:
@@ -70,7 +84,7 @@ class ClaimService:
         earlier request with the same Idempotency-Key.
         """
         request_hash = _request_hash(claim_in)
-        self._correlation_id = uuid.uuid4()
+        self._begin_operation()
 
         if idempotency_key is not None:
             existing = self.claims.get_by_idempotency_key(idempotency_key)
@@ -118,6 +132,13 @@ class ClaimService:
                 raise
             return self._replay(existing, request_hash), False
 
+        CLAIMS_RECEIVED.inc()
+        log.info(
+            "claim_received",
+            claim_id=str(claim.id),
+            lines=len(claim.lines),
+            total_billed=str(claim.total_billed),
+        )
         return claim, True
 
     def validate(self, claim_id: uuid.UUID) -> Claim:
@@ -154,6 +175,16 @@ class ClaimService:
             {"issue_count": len(issues)},
         )
         self.session.commit()
+
+        CLAIMS_VALIDATED.labels(result=claim.status).inc()
+        for i in issues:
+            VALIDATION_FAILURES.labels(edit_code=i.edit_code).inc()
+        log.info(
+            "claim_validated",
+            claim_id=str(claim.id),
+            status=claim.status,
+            issues=[i.edit_code for i in issues],
+        )
         return claim
 
     def adjudicate(self, claim_id: uuid.UUID) -> Claim:
@@ -162,6 +193,7 @@ class ClaimService:
         Allowed from VALIDATED, PENDED (retry once the pend is resolved) and
         APPEALED (re-adjudication decides whether the denial is overturned).
         """
+        started = time.perf_counter()
         claim = self._load_for_action(claim_id, "adjudicate")
 
         claim_input = _to_claim_input(claim)
@@ -190,6 +222,9 @@ class ClaimService:
                 reason_code=r.carc,
                 details={"message": r.message, "inputs": dict(r.inputs)},
             )
+        # Recorded in the audit event too, so /stats can report latency percentiles
+        # that survive restarts (Prometheus counters don't).
+        duration = time.perf_counter() - started
         self._transition(
             claim,
             ClaimStatus(result.outcome),
@@ -197,12 +232,25 @@ class ClaimService:
             if result.outcome is ClaimOutcome.ADJUDICATED
             else AuditEventType.CLAIM_PENDED,
             {
+                "duration_ms": round(duration * 1000, 2),
                 "rules_evaluated": len(result.trace),
                 "accumulators_before": _accumulators_json(ctx.accumulators),
                 "accumulators_after": _accumulators_json(result.accumulators_after),
             },
         )
         self.session.commit()
+
+        ADJUDICATION_LATENCY.observe(duration)
+        ADJUDICATIONS.labels(outcome=result.outcome).inc()
+        for d in result.lines:
+            LINE_DECISIONS.labels(outcome=d.outcome, decided_by=d.decided_by).inc()
+        log.info(
+            "claim_adjudicated",
+            claim_id=str(claim.id),
+            outcome=result.outcome,
+            lines={d.line_number: f"{d.outcome} by {d.decided_by}" for d in result.lines},
+            duration_ms=round(duration * 1000, 2),
+        )
         return claim
 
     def finalize(self, claim_id: uuid.UUID) -> Claim:
@@ -222,6 +270,11 @@ class ClaimService:
             {"approved_lines": len(approved), "total_paid": str(total_paid)},
         )
         self.session.commit()
+
+        CLAIMS_FINALIZED.labels(status=claim.status).inc()
+        log.info(
+            "claim_finalized", claim_id=str(claim.id), status=claim.status, paid=str(total_paid)
+        )
         return claim
 
     def appeal(self, claim_id: uuid.UUID, reason: str) -> Claim:
@@ -231,6 +284,9 @@ class ClaimService:
             claim, ClaimStatus.APPEALED, AuditEventType.CLAIM_APPEALED, {"reason": reason}
         )
         self.session.commit()
+
+        APPEALS.inc()
+        log.info("claim_appealed", claim_id=str(claim.id))
         return claim
 
     def remittance(self, claim_id: uuid.UUID) -> Remittance:
@@ -290,8 +346,14 @@ class ClaimService:
         if claim is None:
             raise ClaimNotFoundError(claim_id)
         assert_action_allowed(claim.status, action)
-        self._correlation_id = uuid.uuid4()
+        self._begin_operation()
         return claim
+
+    def _begin_operation(self) -> None:
+        """New correlation id for this operation, shared by its audit events AND
+        bound into every log line it writes, so logs and audit rows can be joined."""
+        self._correlation_id = uuid.uuid4()
+        structlog.contextvars.bind_contextvars(correlation_id=str(self._correlation_id))
 
     def _transition(
         self, claim: Claim, target: ClaimStatus, event_type: AuditEventType, details: dict

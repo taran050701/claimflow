@@ -14,6 +14,7 @@ as they're completed.
 - [Phase 4: State machine](#phase-4-state-machine)
 - [Phase 5: Remittance](#phase-5-remittance)
 - [Phase 6: Audit log](#phase-6-audit-log)
+- [Phase 7: Quality and observability](#phase-7-quality-and-observability)
 - [Glossary](#glossary)
 
 ---
@@ -86,6 +87,7 @@ deductible remaining and 20% coinsurance.
 | **Deductible** | $250 | The patient pays the first $X of covered care each year. They had $250 left. $350 of the allowed amount remains. |
 | **CAS / CLP / SVC** | 835 segments: adjustments / claim payment info / service line |
 | **CO / PR group codes** | Who owes an unpaid dollar: provider writes off (CO) / patient pays (PR) |
+| **CI** | Continuous integration: every push is automatically linted, migrated and tested |
 | **Coinsurance** | $70 | After the deductible, the cost is split by percentage: 20% × $350. |
 | **Payer pays** | **$280** | $350 − $70 |
 | **Patient owes** | **$320** | $250 + $70 |
@@ -1778,6 +1780,235 @@ chain) complements tamper **prevention**.
 
 ---
 
+## Phase 7: Quality and observability
+
+### 7.1 Continuous integration (CI)
+
+`.github/workflows/ci.yml` runs on **every push to main and every pull
+request**, on GitHub's servers, against a **real PostgreSQL 16** service
+container:
+
+1. `uv sync --locked`: install **exactly** the locked versions (fails if
+   `uv.lock` is out of date)
+2. `ruff check` (lint) and `ruff format --check` (formatting)
+3. `alembic upgrade head` + `alembic check`: migrations apply **and** match the
+   models
+4. `alembic downgrade base` + `upgrade head`: migrations are **reversible**
+5. `pytest --cov-fail-under=95`: all tests, with a coverage floor
+
+CI hygiene worth naming in an interview:
+- **Actions pinned by commit SHA**, not tag. A tag can be moved to point at
+  malicious code (a real supply-chain attack pattern); a SHA can't.
+- **`permissions: contents: read`**: least privilege for the CI token.
+- **`concurrency` + `cancel-in-progress`**: a newer push cancels the stale
+  run, saving free minutes.
+- **Health-checked service**: steps wait until Postgres accepts connections.
+
+### 7.2 Coverage: a smoke detector, not a goal
+
+We're at **99%**. The CI floor is **95%**, which catches backsliding and leaves
+room for code that's genuinely hard to reach (defensive branches that only
+trigger if the DB is broken). Coverage only says a line **ran**, not that
+anything was **checked**. A test with no assertions gets coverage for free.
+The real quality is in the assertions: one-fact-changed rule tests, graph
+properties, balancing invariants, tamper attacks.
+
+### 7.3 Structured logging
+
+**structlog**, one **JSON object per line** on **stdout** (12-factor: the
+platform collects the stream; the app never manages log files).
+
+```json
+{"event": "claim_adjudicated", "claim_id": "…", "outcome": "ADJUDICATED",
+ "lines": {"1": "APPROVED by Pricing"}, "duration_ms": 12.1,
+ "request_id": "…", "correlation_id": "…", "level": "info", "timestamp": "…Z"}
+```
+
+- **Machine-searchable**: filter by `outcome`, chart `duration_ms`, without
+  regexes over free text.
+- **Context via contextvars**: `request_id` is bound once per request by the
+  middleware, `correlation_id` once per operation by the service, and both are
+  merged into every line automatically.
+- **request_id** comes back in the `X-Request-ID` response header (or the
+  caller's own id is kept), so a provider's support ticket points to exact log
+  lines.
+- **correlation_id is the same id as in the audit log**, so logs (operational)
+  and audit rows (legal record) for one adjudication can be joined.
+- Business events are logged **after commit**, so a rolled-back operation is
+  never logged as if it happened.
+- `/health` and `/metrics` aren't logged (they're polled constantly), but they
+  are still counted.
+- `LOG_FORMAT=console` gives readable logs for local dev.
+
+### 7.4 Metrics (Prometheus)
+
+`GET /metrics` exposes:
+
+| Metric | Type | Labels |
+|---|---|---|
+| `claimflow_http_requests_total` | counter | method, **route template**, status |
+| `claimflow_http_request_duration_seconds` | histogram | method, route |
+| `claimflow_claims_received_total` | counter | — |
+| `claimflow_claims_validated_total` | counter | result |
+| `claimflow_validation_failures_total` | counter | edit_code |
+| `claimflow_adjudications_total` | counter | outcome |
+| `claimflow_line_decisions_total` | counter | outcome, decided_by |
+| `claimflow_adjudication_duration_seconds` | histogram | — |
+| `claimflow_claims_finalized_total` | counter | status |
+| `claimflow_appeals_total` | counter | — |
+
+**Counter vs histogram:** a counter only goes up (rates come from
+`rate()` at query time). A histogram counts observations into buckets, which
+gives percentiles (p50/p95/p99) without storing every value.
+
+**Denial rate** is derived at query time, not stored:
+`sum(claims_finalized_total{status="DENIED"}) / sum(claims_finalized_total)`.
+
+**Label cardinality (the golden rule):** every distinct combination of label
+values is a separate time series. A `claim_id` label means one series per claim,
+which explodes memory and cost. So labels come from small fixed sets, and HTTP
+metrics use the **route template** (`/claims/{claim_id}`), not the raw path.
+Unknown paths share one `unmatched` label. A test asserts **no UUID ever
+appears** in `/metrics` output.
+
+### 7.5 Operational metrics vs business stats
+
+Prometheus counters live **in process memory** and reset on restart, and our
+free host sleeps after ~15 minutes idle. So there's also **`GET /stats`**,
+computed from the **database**:
+- claims by status
+- **claim denial rate** = DENIED / (PAID + DENIED)
+- **line denial rate** = denied lines / decided lines
+- **top denial reasons** (CARC + rule + count)
+- **adjudication latency p50 / p95**, from the `duration_ms` now recorded in
+  each adjudication's **audit event** (`percentile_cont` in SQL)
+
+| | `/metrics` | `/stats` |
+|---|---|---|
+| Source | in-memory counters | database |
+| Survives restart | no | yes |
+| Question it answers | "Is the system healthy **right now**?" | "How is the business doing?" |
+| Consumer | Prometheus / Grafana / alerts | humans, dashboards, recruiters |
+
+### 7.6 Where instrumentation lives
+
+Logging and metrics are in the **service layer** and the **HTTP middleware**,
+never in the domain. The rules engine stays pure, so its tests stay fast and
+simple.
+
+### 7.7 Testing observability
+
+- **Logs:** a fixture swaps in structlog's `LogCapture` (with `merge_contextvars`,
+  like production) and tests assert on structured fields: route template,
+  status, request_id, and that the adjudication log's `correlation_id` equals
+  the audit rows'. (We removed structlog's `cache_logger_on_first_use`: it
+  freezes logger configuration on first use, which made capture unreliable.
+  Clarity beats a micro-optimization.)
+- **Metrics:** Prometheus's registry is global, so tests compare **before and
+  after** values (deltas) instead of absolute numbers.
+- **Cardinality guard test:** no UUIDs in `/metrics`.
+
+### Phase 7: questions
+
+**Q7.1 (interview).** What does your CI pipeline do, and why each step?
+
+<details><summary>Answer</summary>
+
+On every push/PR, against a real Postgres 16: install exactly the locked
+dependencies; lint and format-check; apply migrations and confirm they match the
+models (`alembic check`); confirm migrations are reversible (downgrade base →
+upgrade head); run all tests with a 95% coverage floor. Each step catches a
+different class of mistake *before* it reaches main: drifted lockfile, style,
+schema/model mismatch, irreversible migration, broken behavior.
+
+</details>
+
+**Q7.2 (interview).** Why pin GitHub Actions to a commit SHA?
+
+<details><summary>Answer</summary>
+
+Tags are mutable: if an action's repo is compromised, an attacker can move
+`v7` to malicious code and every workflow using `@v7` runs it with access to
+your repo and secrets. A commit SHA is immutable. Keep the version in a comment
+for readability. (Same family: least-privilege `permissions`, locked
+dependencies.)
+
+</details>
+
+**Q7.3 (interview).** What's label cardinality and why does it matter?
+
+<details><summary>Answer</summary>
+
+Each unique combination of label values is a separate time series in
+Prometheus. Labels with unbounded values (claim_id, user_id, raw URL paths with
+ids) create a series per value, which explodes memory, storage and query cost,
+and can take the monitoring system down. Use small fixed sets (outcome, rule,
+route **template**). We test that no UUID appears in `/metrics`.
+
+</details>
+
+**Q7.4 (interview).** Structured vs plain-text logs, and how do you trace one
+request through the system?
+
+<details><summary>Answer</summary>
+
+Structured (JSON) logs have named fields, so you can filter and aggregate without
+fragile regexes. Tracing: middleware assigns a **request_id** (or keeps the
+caller's `X-Request-ID`), binds it via contextvars so every log line carries it,
+and returns it in the response header. Operations add a **correlation_id**,
+which is also stored on the audit rows, joining logs to the legal record.
+
+</details>
+
+**Q7.5 (interview).** How do you measure adjudication latency, and why both a
+histogram and a DB-based p95?
+
+<details><summary>Answer</summary>
+
+The service times each adjudication (load context → rules → record) with
+`perf_counter`, observes it in a Prometheus **histogram** (live p95 via
+`histogram_quantile`, alertable), and stores `duration_ms` in the adjudication's
+audit event. `/stats` computes p50/p95 with `percentile_cont` from the DB. The
+histogram resets on restart (our free host sleeps); the DB value is durable.
+
+</details>
+
+**Q7.6 (bonus).** What does coverage tell you, and what doesn't it?
+
+<details><summary>Answer</summary>
+
+It tells you which lines were **executed** by some test, which is useful for
+spotting untested code and preventing backsliding (our 95% floor). It doesn't
+tell you whether anything was **checked**: a test without meaningful assertions
+still counts. Strong tests come from assertions on behavior and invariants,
+not from the percentage.
+
+</details>
+
+**Q7.7 (bonus).** Why log business events only after the commit?
+
+<details><summary>Answer</summary>
+
+If the transaction rolls back (constraint violation, conflict, crash), the event
+didn't happen. Logging or counting it before the commit would make logs and
+metrics disagree with the database. After the commit, they describe what really
+happened.
+
+</details>
+
+**Q7.8 (bonus).** Prometheus counters reset when the process restarts. Is that
+a problem?
+
+<details><summary>Answer</summary>
+
+Not for Prometheus itself: `rate()` and `increase()` detect counter resets and
+handle them. It *is* a problem if you want lifetime business numbers from the
+process, which is why `/stats` computes them from the database instead.
+
+</details>
+
+---
+
 ## Glossary
 
 | Term | Meaning |
@@ -1789,13 +2020,16 @@ chain) complements tamper **prevention**.
 | **Append-only** | Rows can be inserted and read, never updated or deleted |
 | **Backfill** | Filling a new column for existing rows during a migration |
 | **Balancing** | Remittance rule: billed − adjustments = paid; patient responsibility = PR adjustments |
+| **Cardinality (labels)** | Number of distinct label-value combinations = number of time series |
 | **CARC** | Claim Adjustment Reason Code (e.g. `CO-45`) explaining unpaid dollars |
 | **Accumulator** | Running total of what a member has paid toward the yearly deductible and out-of-pocket max |
 | **CAS / CLP / SVC** | 835 segments: adjustments / claim payment info / service line |
 | **CO / PR group codes** | Who owes an unpaid dollar: provider writes off (CO) / patient pays (PR) |
+| **CI** | Continuous integration: every push is automatically linted, migrated and tested |
 | **Coinsurance** | Percentage of cost the patient pays after the deductible |
 | **Edit** | A front-end validation check; failing one rejects the claim |
 | **Defense in depth** | Enforcing a rule at several layers (app + database) so one failure doesn't break it |
+| **Contextvars** | Python's per-request/per-task context storage; structlog merges it into every log line |
 | **Correlation id** | Id shared by all events from one operation, to group and trace them |
 | **Deadlock** | Two transactions each waiting for a lock the other holds; prevented by a consistent lock order |
 | **Fee schedule** | Contracted price per procedure (the basis of the allowed amount) |
@@ -1803,8 +2037,11 @@ chain) complements tamper **prevention**.
 | **Luhn check digit** | A final digit computed from the others to catch typos (NPIs, credit cards) |
 | **Pessimistic locking** | Lock a row before changing it (`SELECT … FOR UPDATE`) so concurrent changes run one at a time |
 | **Optimistic locking** | Don't lock; detect a concurrent change via a version column and retry |
+| **Prometheus** | Pull-based metrics system that scrapes `/metrics` text endpoints |
 | **Pure function** | Output depends only on inputs; no I/O, no clock, no hidden state |
+| **Structured logging** | Logs as key/value data (JSON), searchable by field |
 | **Strategy pattern** | Interchangeable objects sharing one interface (our rules), chosen/ordered at runtime |
+| **SHA pinning** | Referencing a CI action by immutable commit hash instead of a movable tag |
 | **State machine** | Finite set of states + a table of legal transitions; everything else is illegal |
 | **Trigger** | Database function that runs automatically on INSERT/UPDATE/DELETE; we use one to enforce transitions |
 | **Tamper-evident** | Changes can't be prevented by everyone, but are always detectable |
@@ -1816,6 +2053,7 @@ chain) complements tamper **prevention**.
 | **EOB** | Explanation of Benefits, the member-facing remittance |
 | **ERA / 835** | Electronic remittance advice sent to the provider |
 | **HATEOAS** | REST idea: responses tell the client what it can do next (our `allowed_actions`) |
+| **Histogram** | Metric that counts observations into buckets, enabling percentiles |
 | **Hash chain** | Each record stores a hash of the previous one + itself, making edits detectable |
 | **ICD-10-CM** | Diagnosis codes (the *why*); public domain |
 | **Idempotency** | Repeating a request has the same effect as sending it once |
@@ -1826,6 +2064,7 @@ chain) complements tamper **prevention**.
 | **NPI** | 10-digit National Provider Identifier with a Luhn check digit |
 | **Out-of-pocket max** | Yearly cap on patient spending |
 | **Overturned / upheld** | Appeal outcomes: the denial is reversed (paid) / confirmed (still denied) |
+| **p50 / p95** | Median / 95th-percentile latency: 95% of operations were faster than p95 |
 | **Pended** | Claim parked awaiting information or review |
 | **Prior authorization** | Payer approval required before certain services |
 | **Payment cycle** | Scheduled release of payments for adjudicated claims (e.g. a weekly check run) |
