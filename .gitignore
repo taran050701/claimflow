@@ -1,0 +1,9 @@
+# Virtualenv: real dir is .venv.nosync (kept out of iCloud), .venv is a symlink to it
+.venv
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.env
+.venv.nosync/
+.vscode/
