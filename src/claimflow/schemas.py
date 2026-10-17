@@ -108,3 +108,51 @@ class AppealIn(BaseModel):
     reason: str = Field(
         min_length=1, max_length=500, examples=["Retroactive authorization PA-1001 obtained"]
     )
+
+
+# ---------------------------------------------------------------- remittance
+
+
+class AdjustmentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    group: str = Field(description="CO = provider writes off, PR = patient owes")
+    carc: str
+    amount: Decimal
+    description: str
+
+
+class RemitLineOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    line_number: int
+    procedure_code: str
+    units: int
+    outcome: str
+    billed: Decimal
+    allowed: Decimal
+    paid: Decimal
+    patient_responsibility: Decimal
+    adjustments: list[AdjustmentOut]
+
+
+class RemitTotalsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    billed: Decimal
+    allowed: Decimal
+    paid: Decimal
+    patient_responsibility: Decimal
+    contractual_adjustments: Decimal
+
+
+class RemittanceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    claim_id: uuid.UUID
+    claim_status_code: str = Field(description="835 CLP02: 1 = processed as primary, 4 = denied")
+    member_id: str
+    provider_npi: str
+    date_of_service: date
+    totals: RemitTotalsOut
+    lines: list[RemitLineOut]

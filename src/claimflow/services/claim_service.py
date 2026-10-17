@@ -19,8 +19,13 @@ from claimflow.domain.adjudication import (
 )
 from claimflow.domain.adjudication import adjudicate as run_rules_engine
 from claimflow.domain.enums import AuditEventType, ClaimStatus
-from claimflow.domain.errors import ClaimNotFoundError, IdempotencyKeyConflictError
+from claimflow.domain.errors import (
+    ClaimNotFoundError,
+    IdempotencyKeyConflictError,
+    RemittanceNotAvailableError,
+)
 from claimflow.domain.pricing import Accumulators
+from claimflow.domain.remittance import LineForRemit, Remittance, build_remittance
 from claimflow.domain.state_machine import assert_action_allowed, assert_transition
 from claimflow.domain.validation import ClaimInput, LineInput, ReferenceData, validate_claim
 from claimflow.models import (
@@ -222,6 +227,22 @@ class ClaimService:
         self.session.commit()
         return claim
 
+    def remittance(self, claim_id: uuid.UUID) -> Remittance:
+        """Build the remittance advice from the stored line decisions (read-only).
+
+        Computed on read rather than stored, so it can never disagree with the
+        adjudication record it's derived from.
+        """
+        claim = self.get(claim_id)
+        if claim.status not in (ClaimStatus.PAID, ClaimStatus.DENIED):
+            raise RemittanceNotAvailableError(claim.status)
+        return build_remittance(
+            member_id=claim.member_id,
+            provider_npi=claim.provider_npi,
+            date_of_service=claim.date_of_service,
+            lines=tuple(_to_line_for_remit(line) for line in claim.lines),
+        )
+
     # ------------------------------------------------------------ state helpers
 
     def _load_for_action(self, claim_id: uuid.UUID, action: str) -> Claim:
@@ -356,3 +377,21 @@ def _accumulators_json(acc: Accumulators) -> dict[str, str]:
         "deductible_met": str(acc.deductible_met),
         "out_of_pocket_met": str(acc.out_of_pocket_met),
     }
+
+
+def _to_line_for_remit(line: ClaimLine) -> LineForRemit:
+    adj = line.adjudication  # finalized claims always have a decision per line
+    return LineForRemit(
+        line_number=line.line_number,
+        procedure_code=line.procedure_code,
+        units=line.units,
+        billed=line.billed_amount,
+        outcome=adj.outcome,
+        carc=adj.carc,
+        allowed=adj.allowed,
+        deductible=adj.deductible,
+        copay=adj.copay,
+        coinsurance=adj.coinsurance,
+        patient_responsibility=adj.patient_responsibility,
+        paid=adj.paid,
+    )

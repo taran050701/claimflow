@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from claimflow.db import get_session
 from claimflow.domain.enums import ClaimStatus
-from claimflow.schemas import AppealIn, ClaimIn, ClaimOut, ClaimPage
+from claimflow.schemas import AppealIn, ClaimIn, ClaimOut, ClaimPage, RemittanceOut
 from claimflow.services.claim_service import ClaimService
 
 router = APIRouter(prefix="/claims", tags=["claims"])
@@ -94,6 +94,19 @@ def appeal_claim(claim_id: uuid.UUID, appeal: AppealIn, service: ServiceDep) -> 
     """Appeal a denial: DENIED -> APPEALED. Then call /adjudicate to re-run the
     rules with current data; the result overturns (PAID) or upholds (DENIED)."""
     return ClaimOut.model_validate(service.appeal(claim_id, appeal.reason))
+
+
+@router.get(
+    "/{claim_id}/remittance",
+    response_model=RemittanceOut,
+    responses={409: {"description": "Claim is not finalized (PAID or DENIED)"}},
+)
+def get_remittance(claim_id: uuid.UUID, service: ServiceDep) -> RemittanceOut:
+    """Remittance advice (modeled on the X12 835): billed, allowed, paid and patient
+    responsibility per line and in total, with a group code + CARC for every unpaid
+    dollar. Always balances: billed - adjustments = paid."""
+    remit = service.remittance(claim_id)
+    return RemittanceOut.model_validate({**remit.__dict__, "claim_id": claim_id})
 
 
 @router.get("", response_model=ClaimPage)

@@ -4,7 +4,11 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
 from claimflow.api.claims import router as claims_router
-from claimflow.domain.errors import ClaimNotFoundError, IdempotencyKeyConflictError
+from claimflow.domain.errors import (
+    ClaimNotFoundError,
+    IdempotencyKeyConflictError,
+    RemittanceNotAvailableError,
+)
 from claimflow.domain.state_machine import ActionNotAllowedError, IllegalTransitionError
 
 
@@ -32,6 +36,7 @@ def create_app() -> FastAPI:
         )
 
     # Illegal lifecycle requests are rejected loudly (409), never silently ignored.
+    @app.exception_handler(RemittanceNotAvailableError)
     @app.exception_handler(ActionNotAllowedError)
     @app.exception_handler(IllegalTransitionError)
     def _illegal_state(_: Request, exc: Exception) -> JSONResponse:

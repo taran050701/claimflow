@@ -12,6 +12,7 @@ as they're completed.
 - [Phase 2: Validation](#phase-2-validation)
 - [Phase 3: Rules engine](#phase-3-rules-engine)
 - [Phase 4: State machine](#phase-4-state-machine)
+- [Phase 5: Remittance](#phase-5-remittance)
 - [Glossary](#glossary)
 
 ---
@@ -82,6 +83,8 @@ deductible remaining and 20% coinsurance.
 | **Billed** | $1,500 | The provider's list price. Almost nobody pays this. |
 | **Allowed** | $600 | The provider signed a contract agreeing to a fee schedule. The **$900 difference is written off by the provider**, and the patient owes none of it. |
 | **Deductible** | $250 | The patient pays the first $X of covered care each year. They had $250 left. $350 of the allowed amount remains. |
+| **CAS / CLP / SVC** | 835 segments: adjustments / claim payment info / service line |
+| **CO / PR group codes** | Who owes an unpaid dollar: provider writes off (CO) / patient pays (PR) |
 | **Coinsurance** | $70 | After the deductible, the cost is split by percentage: 20% × $350. |
 | **Payer pays** | **$280** | $350 − $70 |
 | **Patient owes** | **$320** | $250 + $70 |
@@ -1325,6 +1328,210 @@ moment of change.
 
 ---
 
+## Phase 5: Remittance
+
+### 5.1 What a remittance is
+
+After a claim is finalized, the payer tells the provider what happened to
+**every dollar**:
+- **X12 835 / ERA** (Electronic Remittance Advice): sent to the **provider**.
+  Their billing system uses it to post payments and decide whom to bill for
+  the rest.
+- **EOB** (Explanation of Benefits): the friendlier version sent to the
+  **patient**.
+
+Endpoint: `GET /claims/{id}/remittance`, available only for **PAID** or
+**DENIED** claims (otherwise 409).
+Code: `src/claimflow/domain/remittance.py`.
+
+### 5.2 Structure (mirrors the 835)
+
+| 835 segment | Level | Our JSON |
+|---|---|---|
+| **CLP** | Claim | `claim_status_code` (`1` = processed as primary, `4` = denied), `totals` |
+| **SVC** | Service line | each line: billed, allowed, paid, patient responsibility, outcome |
+| **CAS** | Adjustment | `adjustments`: **group code + CARC + amount** for every unpaid dollar |
+
+### 5.3 Group codes say who owes the dollar
+
+| Group | Meaning | Examples |
+|---|---|---|
+| **CO** | Contractual obligation: **provider writes it off** | CO-45 over fee schedule, CO-96 not covered, CO-197 no auth, CO-18 duplicate |
+| **PR** | Patient responsibility: **provider bills the patient** | PR-1 deductible, PR-2 coinsurance, PR-3 copay |
+| OA / PI | Other / payer-initiated (not used here) | |
+
+**How adjustments are generated per line:**
+- **Approved line:** CO-45 = billed − allowed; PR-1 = deductible; PR-2 =
+  coinsurance; PR-3 = copay. **Zero-amount adjustments are omitted.**
+- **Denied line:** one adjustment for the **whole charge**, using the denial's
+  CARC (e.g. CO-197 $1,500).
+
+### 5.4 Balancing: the golden rule
+
+For **every line** and for the **claim totals**:
+
+```
+billed − Σ adjustments = paid
+patient responsibility = Σ PR adjustments
+```
+
+MRI: 1,500 − (CO-45 900 + PR-1 250 + PR-2 70) = **280 paid**;
+PR = 250 + 70 = **320**. ✓
+
+Provider systems **reject 835s that don't balance**, so the builder checks and
+raises `RemittanceImbalanceError` instead of ever returning an unbalanced
+remittance. It's the third layer of money safety:
+
+| Layer | Where | What it guarantees |
+|---|---|---|
+| 1 | Pricing tests (Phase 3) | `allowed = paid + patient` for every scenario tested |
+| 2 | DB CHECK constraints (Phase 3) | No unbalanced line decision can be stored |
+| 3 | Remittance builder (Phase 5) | No unbalanced remittance can be issued |
+
+### 5.5 Claim status code
+
+`1` (processed as primary) if **any** line was approved, even if the payer
+paid **$0** because of the deductible. `4` (denied) only if **every** line
+was denied. Same rule as finalize's PAID vs DENIED.
+
+### 5.6 Design decision: compute on read vs store
+
+The remittance is **built on request** from the stored line decisions:
+- ✅ **One source of truth**: it can't disagree with the adjudication record.
+- ✅ No extra table, no sync logic.
+- ❌ Real payers **store every 835 they send**. If an appeal changes the
+  outcome, they issue a **reversal** (undo the original, negative amounts) plus
+  a **correction** (the new result), and both documents are kept forever.
+
+Our **audit log** keeps the full decision history, so nothing is lost.
+Persisting issued remittances with reversal/correction pairs is on the "with
+more time" list. Being able to name this tradeoff (**derived data vs stored
+snapshot**) is the interview point.
+
+### 5.7 A defended simplification: all denials are CO
+
+In real 835s, eligibility denials (`26`/`27`) are often sent as **PR**: the
+patient wasn't covered, so the provider may bill them directly. We use **CO**
+for all denials so the payer's record never shifts cost onto a patient by
+itself. Know this, and say it before an interviewer does.
+
+### 5.8 Pure builder, again
+
+`build_remittance()` takes plain `LineForRemit` dataclasses and returns a
+`Remittance`, with no DB and no framework. The service maps ORM rows → domain
+objects (`_to_line_for_remit`), and the API maps the result → Pydantic. Same
+pattern as validation and adjudication: **pure core, thin adapters**.
+
+**A testing lesson from this phase:** our first test for the patient-share check
+failed. Its input broke the *line balance* too, so a different check fired
+first. A test that breaks one thing must break **only** that thing; otherwise
+you're testing whichever check happens to run first.
+
+### Phase 5: questions
+
+**Q5.1 (interview).** What's a remittance, and how does an 835 relate to an
+EOB?
+
+<details><summary>Answer</summary>
+
+A remittance explains what happened to every billed dollar after a claim is
+finalized: paid, written off, or owed by the patient, each with a reason code.
+The **835 / ERA** is the electronic version sent to the **provider** (who posts
+payments and bills patients from it); the **EOB** is the readable version sent
+to the **patient**. Same facts, different audience.
+
+</details>
+
+**Q5.2 (interview).** What do the CO and PR group codes mean, and why do they
+matter?
+
+<details><summary>Answer</summary>
+
+They say **who is responsible** for an unpaid dollar. **CO** (contractual
+obligation): the provider must write it off and **cannot bill the patient**
+(e.g. CO-45 above fee schedule, CO-197 no auth). **PR** (patient
+responsibility): the provider **bills the patient** (PR-1 deductible, PR-2
+coinsurance, PR-3 copay). Get it wrong and a patient is billed for something
+they don't owe, or the provider loses money they're owed.
+
+</details>
+
+**Q5.3 (interview).** What does it mean for a remittance to "balance", and how
+do you guarantee it?
+
+<details><summary>Answer</summary>
+
+For every line and for the claim: `billed − Σ adjustments = paid`, and
+`patient responsibility = Σ PR adjustments`. Provider systems reject 835s that
+don't balance. We guarantee it in three layers: pricing tests, DB CHECK
+constraints on line decisions, and the builder itself, which raises instead of
+returning an unbalanced remittance.
+
+</details>
+
+**Q5.4 (interview).** Why compute the remittance on read instead of storing
+it? What would a real payer do differently?
+
+<details><summary>Answer</summary>
+
+Computing from the stored decisions gives **one source of truth**: it can't
+drift from the adjudication record, and there's no extra table or sync logic.
+Real payers **store every 835 sent**, because it's a legal/financial document,
+and correct mistakes with **reversal + correction** pairs rather than editing
+history. We keep history in the append-only audit log; storing issued
+remittances is a "with more time" item.
+
+</details>
+
+**Q5.5 (interview).** Walk through the MRI remittance line by line.
+
+<details><summary>Answer</summary>
+
+Billed $1,500. **CO-45 $900** (above the $600 contracted rate; the provider writes
+it off). **PR-1 $250** (rest of the deductible) and **PR-2 $70** (20% coinsurance on
+the remaining $350): the patient owes $320. **Paid $280.** Check:
+1500 − (900 + 250 + 70) = 280 ✓; PR 250 + 70 = 320 ✓. Claim status code `1`.
+
+</details>
+
+**Q5.6 (bonus).** A claim's only line went entirely to the deductible and the
+payer paid $0. What claim status code does the remittance show?
+
+<details><summary>Answer</summary>
+
+`1`, processed as primary, **not** `4` (denied). The service was covered and
+approved; the adjustment is PR-1 (deductible), so the patient owes the
+allowed amount. Denied means the payer refused the service (a CO reason).
+
+</details>
+
+**Q5.7 (bonus).** Why do we send eligibility denials as CO when real payers
+often use PR?
+
+<details><summary>Answer</summary>
+
+A deliberate simplification: with CO, the payer's record never on its own
+shifts cost onto a patient. In reality, PR-27 says "the patient wasn't
+covered, so the provider may bill them", which is often correct but depends on
+rules outside our scope (e.g. whether the patient was informed). Saying this
+upfront shows you know the real behavior.
+
+</details>
+
+**Q5.8 (bonus).** Our first patient-share test failed even though the code was
+right. Why, and what's the general lesson?
+
+<details><summary>Answer</summary>
+
+The test input broke the **line balance** as well as the patient share, so the
+balance check raised first with a different message. A test meant to exercise
+one rule must keep every *other* rule satisfied; otherwise it tests whichever
+check happens to run first, and passes or fails for the wrong reason.
+
+</details>
+
+---
+
 ## Glossary
 
 | Term | Meaning |
@@ -1332,8 +1539,11 @@ moment of change.
 | **Adjudication** | The payer deciding whether and how much to pay on a claim |
 | **Allowed amount** | The contracted price for a service; the most anyone pays |
 | **Atomicity** | All writes in a transaction succeed together or none do |
+| **Balancing** | Remittance rule: billed − adjustments = paid; patient responsibility = PR adjustments |
 | **CARC** | Claim Adjustment Reason Code (e.g. `CO-45`) explaining unpaid dollars |
 | **Accumulator** | Running total of what a member has paid toward the yearly deductible and out-of-pocket max |
+| **CAS / CLP / SVC** | 835 segments: adjustments / claim payment info / service line |
+| **CO / PR group codes** | Who owes an unpaid dollar: provider writes off (CO) / patient pays (PR) |
 | **Coinsurance** | Percentage of cost the patient pays after the deductible |
 | **Edit** | A front-end validation check; failing one rejects the claim |
 | **Defense in depth** | Enforcing a rule at several layers (app + database) so one failure doesn't break it |
@@ -1366,5 +1576,6 @@ moment of change.
 | **Pended** | Claim parked awaiting information or review |
 | **Prior authorization** | Payer approval required before certain services |
 | **Payment cycle** | Scheduled release of payments for adjudicated claims (e.g. a weekly check run) |
+| **Reversal + correction** | How payers fix an issued 835: undo the original, issue the corrected one |
 | **Rejected vs denied** | Rejected = failed validation, never adjudicated; denied = adjudicated, not paid |
 | **X12 837 / 999 / 277CA** | EDI claim file / syntax acknowledgment / content acknowledgment |

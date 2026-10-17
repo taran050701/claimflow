@@ -8,3 +8,13 @@ class ClaimNotFoundError(Exception):
 
 class IdempotencyKeyConflictError(Exception):
     """The same Idempotency-Key was reused with a different request body."""
+
+
+class RemittanceNotAvailableError(Exception):
+    """Remittances exist only for finalized (PAID or DENIED) claims."""
+
+    def __init__(self, status: str) -> None:
+        super().__init__(
+            f"No remittance for a claim in status {status}; "
+            "remittances are issued once a claim is PAID or DENIED"
+        )
