@@ -9,3 +9,9 @@ __pycache__/
 .vscode/
 .coverage
 htmlcov/
+
+# Local AI-assistant tooling (Neon MCP server + agent skills): useful on this
+# machine, not part of the project
+.mcp.json
+.claude/
+skills-lock.json
