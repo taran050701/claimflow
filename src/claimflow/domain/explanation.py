@@ -112,9 +112,11 @@ def _explain_line(
     if claim_level_denial is not None:
         decisive, passed = claim_level_denial, ()
     else:
+        # Claim-level rules (Eligibility) ran first for every line, then the line's own.
+        cleared = [r for r in run if r.line_number is None]
         evaluated = [r for r in run if r.line_number == number]
         decisive = evaluated[-1]  # short-circuit: the last rule evaluated decided the line
-        passed = tuple(r.rule_name or "" for r in evaluated[:-1])
+        passed = tuple(r.rule_name or "" for r in cleared + evaluated[:-1])
     return LineExplanation(
         line_number=number,
         procedure_code=code,

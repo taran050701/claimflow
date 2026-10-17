@@ -173,7 +173,7 @@ def test_explanation_for_prior_auth_denial(client):
         "PriorAuth",
         "197",
     )
-    assert line["rules_passed"] == ["Coverage", "CodeEdits"]
+    assert line["rules_passed"] == ["Eligibility", "Coverage", "CodeEdits"]
     assert line["inputs"]["auths_on_file"] == []
     assert "denied by PriorAuth" in body["summary"]
 

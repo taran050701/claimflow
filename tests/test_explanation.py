@@ -78,7 +78,7 @@ def test_line_denied_by_prior_auth_shows_rule_reason_and_inputs():
     assert (mri.outcome, mri.decided_by, mri.reason_code) == ("DENIED", "PriorAuth", "197")
     assert mri.reason == "Precertification/authorization absent"
     assert mri.inputs == {"required": True, "auths_on_file": []}
-    assert mri.rules_passed == ("Coverage", "CodeEdits")
+    assert mri.rules_passed == ("Eligibility", "Coverage", "CodeEdits")
     assert e.summary == (
         "DENIED: 1 approved, 1 denied; line 2 (72148) denied by PriorAuth: "
         "CO-197 Precertification/authorization absent"
