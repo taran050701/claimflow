@@ -1,7 +1,9 @@
 """Application entry point: `uvicorn claimflow.main:app`."""
 
+from pathlib import Path
+
 from fastapi import FastAPI, Request, Response, status
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from claimflow.api.claims import router as claims_router
@@ -36,6 +38,9 @@ Each claim response lists its `allowed_actions`.
 
 *Free hosting: the first request after idle can take ~30–60 s while the server wakes up.*
 """
+
+
+DASHBOARD = Path(__file__).parent / "static" / "index.html"
 
 
 def create_app() -> FastAPI:
@@ -77,19 +82,26 @@ def create_app() -> FastAPI:
     def _illegal_state(_: Request, exc: Exception) -> JSONResponse:
         return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)})
 
-    # HEAD too: uptime monitors and load balancers often probe with HEAD.
+    # The dashboard: one static page that calls this same JSON API (same origin, so
+    # no CORS and no second host). HEAD too: uptime monitors often probe with it.
     @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
-    def root() -> RedirectResponse:
-        return RedirectResponse("/docs")
+    def dashboard() -> FileResponse:
+        return FileResponse(DASHBOARD)
 
     @app.get("/metrics", tags=["ops"], include_in_schema=False)
     def metrics() -> Response:
         """Prometheus scrape endpoint (text exposition format)."""
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-    @app.api_route("/health", methods=["GET", "HEAD"], tags=["ops"])
+    @app.get("/health", tags=["ops"])
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    # Separate HEAD route, hidden from the docs: one route for both methods would
+    # give two OpenAPI operations the same id.
+    @app.head("/health", include_in_schema=False)
+    def health_head() -> Response:
+        return Response()
 
     return app
 

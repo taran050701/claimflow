@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClaimFlow</title>
+<meta name="description" content="A healthcare claims adjudication pipeline: validation, rules engine, state machine, remittance and a tamper-evident audit log.">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1b1f24; --muted: #5b6573; --line: #e3e6ea;
+    --accent: #2f5bd3; --accent-soft: #e8eefc;
+    --paid: #1f7a4d; --paid-soft: #e3f4ea; --denied: #b42318; --denied-soft: #fde8e6;
+    --pended: #9a5b00; --pended-soft: #fdf1dc; --rejected: #4b5563; --rejected-soft: #eceef1;
+    --other: #2f5bd3; --other-soft: #e8eefc;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --panel: #171b21; --ink: #e7eaee; --muted: #9aa4b1; --line: #2a3038;
+      --accent: #7d9bff; --accent-soft: #1d2740;
+      --paid: #5fd39a; --paid-soft: #12291e; --denied: #ff8a7a; --denied-soft: #34181a;
+      --pended: #f2b65a; --pended-soft: #33260f; --rejected: #b6bec9; --rejected-soft: #23282f;
+      --other: #7d9bff; --other-soft: #1d2740;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--accent); }
+  header { background: var(--panel); border-bottom: 1px solid var(--line); }
+  .wrap { max-width: 1240px; margin: 0 auto; padding-inline: 20px; }
+  .top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+         gap: 12px; padding-block: 14px; }
+  .brand { font-weight: 700; font-size: 20px; letter-spacing: -0.01em; }
+  .brand small { font-weight: 400; color: var(--muted); font-size: 14px; margin-left: 8px; }
+  nav { display: flex; flex-wrap: wrap; gap: 16px; }
+  nav a { text-decoration: none; font-weight: 500; }
+  .intro { color: var(--muted); max-width: 820px; margin: 18px 0 6px; }
+  .notice { margin: 12px 0; padding: 10px 14px; border-radius: 8px; background: var(--accent-soft); }
+  .notice.error { background: var(--denied-soft); color: var(--denied); }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 16px 0; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card .k { color: var(--muted); font-size: 13px; }
+  .card .v { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .card .s { color: var(--muted); font-size: 13px; }
+  .reasons { display: grid; gap: 6px; margin-top: 6px; }
+  .reason { display: grid; grid-template-columns: 52px 1fr auto; gap: 8px; align-items: center; font-size: 13px; }
+  .bar { height: 6px; border-radius: 3px; background: var(--denied); opacity: .75; }
+
+  .layout { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 16px; margin-bottom: 40px; }
+  @media (max-width: 900px) { .layout { grid-template-columns: minmax(0, 1fr); } }  /* 1fr alone can't shrink below its content */
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  .panel h2 { font-size: 15px; margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  .chip { border: 1px solid var(--line); background: transparent; color: var(--ink); border-radius: 999px;
+          padding: 3px 10px; font: inherit; font-size: 13px; cursor: pointer; }
+  .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .list { max-height: 70vh; overflow-y: auto; }
+  .row { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 12px; padding: 10px 16px;
+         border: 0; border-bottom: 1px solid var(--line); border-left: 3px solid transparent;
+         cursor: pointer; width: 100%; text-align: left; background: none; color: inherit; font: inherit; }
+  .row:hover { background: var(--accent-soft); }
+  .row[aria-current="true"] { background: var(--accent-soft); border-left-color: var(--accent); }
+  .row .meta { color: var(--muted); font-size: 13px; grid-column: 2 / 4; }
+  .money { font-variant-numeric: tabular-nums; text-align: right; }
+
+  .badge { display: inline-block; border-radius: 999px; padding: 1px 9px; font-size: 12px; font-weight: 600;
+           background: var(--other-soft); color: var(--other); white-space: nowrap; }
+  .b-PAID, .b-APPROVED { background: var(--paid-soft); color: var(--paid); }
+  .b-DENIED { background: var(--denied-soft); color: var(--denied); }
+  .b-PENDED { background: var(--pended-soft); color: var(--pended); }
+  .b-REJECTED { background: var(--rejected-soft); color: var(--rejected); }
+
+  .detail { padding: 16px; }
+  .detail h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 22px 0 8px; }
+  .title { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .title h2 { border: 0; padding: 0; font-size: 18px; }
+  .facts { color: var(--muted); font-size: 14px; margin-top: 4px; }
+  .summary { padding: 12px 14px; border-radius: 8px; background: var(--accent-soft); font-weight: 500; margin-top: 14px; }
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { padding: 7px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 13px; }
+  td.money, th.money { text-align: right; }
+  .adj { display: inline-block; margin: 2px 6px 2px 0; padding: 1px 7px; border-radius: 6px; font-size: 12px;
+         border: 1px solid var(--line); }
+  .adj.CO { border-color: var(--rejected); } .adj.PR { border-color: var(--pended); }
+  details { margin-top: 6px; } summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow-x: auto;
+        font-size: 12px; margin: 6px 0 0; }
+  .timeline { list-style: none; padding: 0; margin: 0; }
+  .timeline li { padding: 4px 0 4px 14px; border-left: 2px solid var(--line); position: relative; font-size: 14px; }
+  .timeline li::before { content: ""; position: absolute; left: -5px; top: 11px; width: 8px; height: 8px;
+                         border-radius: 50%; background: var(--accent); }
+  .ok { color: var(--paid); font-weight: 600; } .bad { color: var(--denied); font-weight: 600; }
+  .empty { color: var(--muted); padding: 24px 16px; }
+  footer { color: var(--muted); font-size: 13px; padding-block: 0 30px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap top">
+    <div class="brand">ClaimFlow <small>healthcare claims adjudication</small></div>
+    <nav>
+      <a href="/docs">API docs</a>
+      <a href="https://github.com/taran050701/claimflow">GitHub</a>
+      <a href="https://github.com/taran050701/claimflow/blob/main/docs/LESSONS.md">Design notes</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <p class="intro">
+    What a health insurer does when a doctor's bill arrives: <strong>validate</strong> it,
+    <strong>adjudicate</strong> it through an ordered rules engine, move it through a strict
+    <strong>lifecycle</strong>, explain every dollar in a <strong>remittance</strong>, and record every
+    decision in a <strong>tamper-evident audit log</strong>. Pick a claim to see why it was decided.
+  </p>
+  <div id="notice" class="notice" role="status">Loading… the free server can take up to a minute to wake up.</div>
+
+  <section class="stats" id="stats" aria-label="Summary statistics"></section>
+
+  <section class="layout">
+    <div class="panel">
+      <h2>Claims</h2>
+      <div class="filters" id="filters" role="group" aria-label="Filter by status"></div>
+      <div class="list" id="list"></div>
+    </div>
+    <div class="panel" id="detail" aria-live="polite">
+      <div class="empty">Select a claim to see its decision, explanation, remittance and audit trail.</div>
+    </div>
+  </section>
+</main>
+
+<footer class="wrap">
+  Read-only view of the live API. Every value on this page comes from ClaimFlow's JSON endpoints,
+  the same ones documented in <a href="/docs">/docs</a>. All members and claims are fictional.
+</footer>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------- helpers
+// Every value from the API goes in as TEXT (append/textContent), never as HTML,
+// so a claim field containing "<script>" can't run as code (XSS).
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs || {})) {
+    if (value == null || value === false) continue;
+    if (key === "class") node.className = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value === true ? "" : value);
+  }
+  for (const child of children.flat(Infinity)) {  // nested arrays of rows are fine
+    if (child == null || child === false) continue;
+    node.append(child instanceof Node ? child : String(child));
+  }
+  return node;
+}
+
+async function api(path) {
+  const resp = await fetch(path, { headers: { Accept: "application/json" } });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw Object.assign(new Error(body.detail || resp.statusText), { status: resp.status });
+  }
+  return resp.json();
+}
+
+const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+const money = (v) => usd.format(Number(v || 0));
+const pct = (v) => (v == null ? "–" : `${(v * 100).toFixed(1)}%`);
+const badge = (status) => el("span", { class: `badge b-${status}` }, status);
+const shortId = (id) => id.slice(0, 8);
+const paidTotal = (claim) =>
+  claim.lines.reduce((sum, l) => sum + Number(l.adjudication ? l.adjudication.paid : 0), 0);
+
+const STATUS_ORDER = ["PAID", "DENIED", "PENDED", "REJECTED", "ADJUDICATED", "APPEALED", "VALIDATED", "RECEIVED"];
+let claims = [];
+let filter = "ALL";
+let scrollOnLoad = false;  // on phones the detail sits below the list: bring it into view
+
+// ---------------------------------------------------------------- stats
+function renderStats(s) {
+  const total = Object.values(s.claims_by_status).reduce((a, b) => a + b, 0);
+  const lat = s.adjudication_latency;
+  const maxReason = Math.max(1, ...s.top_denial_reasons.map((r) => r.lines));
+  document.getElementById("stats").replaceChildren(
+    el("div", { class: "card" },
+      el("div", { class: "k" }, "Claims"),
+      el("div", { class: "v" }, total),
+      el("div", { class: "s" }, Object.entries(s.claims_by_status).map(([k, v]) => `${v} ${k.toLowerCase()}`).join(" · "))),
+    el("div", { class: "card" },
+      el("div", { class: "k" }, "Claim denial rate"),
+      el("div", { class: "v" }, pct(s.claim_denial_rate)),
+      el("div", { class: "s" }, `Line denial rate ${pct(s.line_denial_rate)}`)),
+    el("div", { class: "card" },
+      el("div", { class: "k" }, "Adjudication latency"),
+      el("div", { class: "v" }, lat.p50_ms == null ? "–" : `${Math.round(lat.p50_ms)} ms`),
+      el("div", { class: "s" }, lat.p95_ms == null ? "no runs yet" : `median (p50) · p95 ${Math.round(lat.p95_ms)} ms · ${lat.runs} runs`)),
+    el("div", { class: "card" },
+      el("div", { class: "k" }, "Top denial reasons"),
+      el("div", { class: "reasons" },
+        s.top_denial_reasons.length === 0 ? el("div", { class: "s" }, "none yet") :
+        s.top_denial_reasons.slice(0, 5).map((r) =>
+          el("div", { class: "reason", title: `${r.reason} (rule: ${r.rule})` },
+            el("strong", {}, `CO-${r.carc}`),
+            el("div", { class: "bar", style: `width:${(r.lines / maxReason) * 100}%` }),
+            el("span", {}, r.lines))))),
+  );
+}
+
+// ---------------------------------------------------------------- list
+function renderFilters() {
+  const present = STATUS_ORDER.filter((s) => claims.some((c) => c.status === s));
+  document.getElementById("filters").replaceChildren(
+    ...["ALL", ...present].map((s) =>
+      el("button", {
+        class: "chip", type: "button", "aria-pressed": String(filter === s),
+        onclick: () => { filter = s; renderFilters(); renderList(); },
+      }, s === "ALL" ? `All (${claims.length})` : `${s} (${claims.filter((c) => c.status === s).length})`)),
+  );
+}
+
+function renderList() {
+  const selected = selectedId();
+  const shown = claims.filter((c) => filter === "ALL" || c.status === filter);
+  document.getElementById("list").replaceChildren(
+    ...(shown.length === 0 ? [el("div", { class: "empty" }, "No claims.")] :
+      shown.map((c) =>
+        el("button", {
+          class: "row", type: "button", "aria-current": String(c.id === selected),
+          onclick: () => { scrollOnLoad = true; location.hash = `claim=${c.id}`; },
+        },
+          badge(c.status),
+          el("span", {}, c.lines.map((l) => l.procedure_code).join(", ")),
+          el("span", { class: "money" }, money(c.total_billed)),
+          el("span", { class: "meta" },
+            `${c.date_of_service} · member ${c.member_id} · paid ${money(paidTotal(c))}`)))),
+  );
+}
+
+// ---------------------------------------------------------------- detail
+function selectedId() {
+  const m = location.hash.match(/claim=([0-9a-f-]{36})/);
+  return m ? m[1] : null;
+}
+
+async function renderDetail() {
+  const id = selectedId();
+  const panel = document.getElementById("detail");
+  renderList();
+  if (!id) return;
+  panel.replaceChildren(el("div", { class: "empty" }, "Loading claim…"));
+
+  try {
+    const claim = await api(`/claims/${id}`);
+    const finalized = claim.status === "PAID" || claim.status === "DENIED";
+    const [explanation, audit, verify, remit] = await Promise.all([
+      api(`/claims/${id}/explanation`),
+      api(`/claims/${id}/audit`),
+      api(`/claims/${id}/audit/verify`),
+      finalized ? api(`/claims/${id}/remittance`) : Promise.resolve(null),
+    ]);
+    if (selectedId() !== id) return; // user clicked another claim meanwhile
+    panel.replaceChildren(el("div", { class: "detail" },
+      header(claim), el("div", { class: "summary" }, explanation.summary),
+      decisions(claim, explanation),
+      remit && remittance(remit),
+      auditTrail(audit, verify),
+    ));
+    if (scrollOnLoad && window.matchMedia("(max-width: 900px)").matches) {
+      panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    scrollOnLoad = false;
+  } catch (err) {
+    panel.replaceChildren(el("div", { class: "empty" }, `Could not load claim: ${err.message}`));
+  }
+}
+
+function header(c) {
+  const next = c.allowed_actions.length ? `next possible action: ${c.allowed_actions.join(", ")}` : "final status";
+  return el("div", {},
+    el("div", { class: "title" }, el("h2", {}, `Claim ${shortId(c.id)}`), badge(c.status)),
+    el("div", { class: "facts" },
+      `Date of service ${c.date_of_service} · member ${c.member_id} · provider NPI ${c.provider_npi} · ` +
+      `diagnoses ${c.diagnosis_codes.join(", ") || "none"} · billed ${money(c.total_billed)} · ${next}`));
+}
+
+function decisions(claim, explanation) {
+  if (explanation.validation_failures.length) {
+    return [
+      el("h3", {}, "Why it was rejected (validation)"),
+      el("div", { class: "tablewrap" }, el("table", {},
+        el("thead", {}, el("tr", {}, el("th", {}, "Edit"), el("th", {}, "Line"), el("th", {}, "Reason"), el("th", {}, "Detail"))),
+        el("tbody", {}, explanation.validation_failures.map((f) => el("tr", {},
+          el("td", {}, f.edit_code), el("td", {}, f.line_number ?? "claim"),
+          el("td", {}, f.reason_code ? `CARC ${f.reason_code}: ${f.reason}` : "–"), el("td", {}, f.message)))))),
+    ];
+  }
+  if (!explanation.lines.length) return el("h3", {}, "No adjudication decision yet");
+
+  const byLine = Object.fromEntries(claim.lines.map((l) => [l.line_number, l]));
+  return [
+    el("h3", {}, "Line decisions (rules engine)"),
+    el("div", { class: "tablewrap" }, el("table", {},
+      el("thead", {}, el("tr", {},
+        el("th", {}, "#"), el("th", {}, "CPT"), el("th", {}, "Outcome"), el("th", {}, "Decided by"),
+        el("th", { class: "money" }, "Billed"), el("th", { class: "money" }, "Paid"), el("th", { class: "money" }, "Patient"))),
+      el("tbody", {}, explanation.lines.map((x) => {
+        const adj = (byLine[x.line_number] || {}).adjudication || {};
+        return [
+          el("tr", {},
+            el("td", {}, x.line_number), el("td", {}, x.procedure_code), el("td", {}, badge(x.outcome)),
+            el("td", {}, x.decided_by, x.reason_code ? el("div", { class: "facts" }, `CO-${x.reason_code} ${x.reason}`) : null),
+            el("td", { class: "money" }, money((byLine[x.line_number] || {}).billed_amount)),
+            el("td", { class: "money" }, money(adj.paid)),
+            el("td", { class: "money" }, money(adj.patient_responsibility))),
+          el("tr", {}, el("td", { colspan: "7" },
+            el("div", { class: "facts" }, x.message,
+              x.rules_passed.length ? ` · passed first: ${x.rules_passed.join(" → ")}` : ""),
+            el("details", {}, el("summary", {}, `What ${x.decided_by} looked at`),
+              el("pre", {}, JSON.stringify(x.inputs, null, 2))))),
+        ];
+      })))),
+  ];
+}
+
+function remittance(r) {
+  const t = r.totals;
+  return [
+    el("h3", {}, `Remittance (835-style) · claim status code ${r.claim_status_code}`),
+    el("div", { class: "facts" },
+      `Billed ${money(t.billed)} − adjustments = paid ${money(t.paid)} · ` +
+      `patient owes ${money(t.patient_responsibility)} · provider write-off ${money(t.contractual_adjustments)}`),
+    el("div", { class: "tablewrap" }, el("table", {},
+      el("thead", {}, el("tr", {}, el("th", {}, "Line"), el("th", {}, "Adjustments (group-CARC amount)"), el("th", { class: "money" }, "Paid"))),
+      el("tbody", {}, r.lines.map((l) => el("tr", {},
+        el("td", {}, `${l.line_number} · ${l.procedure_code}`),
+        el("td", {}, l.adjustments.length ? l.adjustments.map((a) =>
+          el("span", { class: `adj ${a.group}`, title: a.description }, `${a.group}-${a.carc} ${money(a.amount)}`)) : "none"),
+        el("td", { class: "money" }, money(l.paid))))))),
+    el("div", { class: "facts" }, "CO = provider writes it off · PR = patient responsibility (hover a code for its meaning)"),
+  ];
+}
+
+function auditTrail(events, verify) {
+  const changes = events.filter((e) => e.to_status);
+  const rules = events.filter((e) => e.event_type === "RULE_EVALUATED").length;
+  return [
+    el("h3", {}, "Audit trail"),
+    el("div", {},
+      verify.valid
+        ? el("span", { class: "ok" }, `✓ Hash chain verified (${verify.event_count} events)`)
+        : el("span", { class: "bad" }, `✗ Chain broken at event ${verify.first_invalid_seq}`),
+      el("span", { class: "facts" }, ` · ${rules} rule evaluations recorded · append-only`)),
+    el("ul", { class: "timeline" }, changes.map((e) =>
+      el("li", {}, `${e.from_status ? `${e.from_status} → ` : ""}${e.to_status}`,
+        el("span", { class: "facts" }, ` · ${new Date(e.created_at).toLocaleString()}`)))),
+  ];
+}
+
+// ---------------------------------------------------------------- boot
+async function boot() {
+  const notice = document.getElementById("notice");
+  try {
+    const [stats, page] = await Promise.all([api("/stats"), api("/claims?limit=100")]);
+    claims = page.items;
+    renderStats(stats);
+    renderFilters();
+    if (!selectedId() && claims.length) {
+      const denied = claims.find((c) => c.status === "DENIED") || claims[0];
+      history.replaceState(null, "", `#claim=${denied.id}`);
+    }
+    notice.remove();
+    await renderDetail();
+  } catch (err) {
+    notice.className = "notice error";
+    notice.textContent = `Could not reach the API (${err.message}). The free server may still be waking up; refresh in a moment.`;
+  }
+}
+
+window.addEventListener("hashchange", renderDetail);
+boot();
+</script>
+</body>
+</html>

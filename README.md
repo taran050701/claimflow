@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/taran050701/claimflow/actions/workflows/ci.yml/badge.svg)](https://github.com/taran050701/claimflow/actions/workflows/ci.yml)
 ![Python 3.13](https://img.shields.io/badge/python-3.13-blue)
-![Tests](https://img.shields.io/badge/tests-164%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-166%20passing-brightgreen)
 ![Coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)
 
 **A healthcare claims adjudication backend: what a health insurer's systems do
@@ -11,7 +11,7 @@ what to pay through an ordered rules engine, tracks every claim through a strict
 lifecycle, explains every dollar with industry reason codes, and keeps a
 tamper-evident audit trail of every decision.
 
-**▶ Live demo: [claimflow-vpno.onrender.com](https://claimflow-vpno.onrender.com)** (opens the interactive Swagger UI)
+**▶ Live demo: [claimflow-vpno.onrender.com](https://claimflow-vpno.onrender.com)** (dashboard) · [API docs](https://claimflow-vpno.onrender.com/docs)
 *(free hosting: the first request after idle takes ~30–60 s to wake the server)*
 
 ---
@@ -33,9 +33,16 @@ Had the prior authorization been missing, the claim would be **DENIED with
 
 ## Try it in 2 minutes
 
-Open the live demo. It's preloaded with 11 claims covering every path:
+[![ClaimFlow dashboard](docs/images/dashboard.png)](https://claimflow-vpno.onrender.com)
+
+Open the [live demo](https://claimflow-vpno.onrender.com). It's preloaded with 11 claims covering every path:
 paid, denied (no auth, not covered, duplicate, terminated coverage, too many
 units), partially paid, pended, rejected, and an appeal that was overturned.
+Click any claim to see **why** it was decided: the deciding rule and what it
+looked at, the remittance with reason codes, and the verified audit trail.
+
+The dashboard is a read-only client of the JSON API. To explore the API itself,
+open [`/docs`](https://claimflow-vpno.onrender.com/docs):
 
 1. `GET /claims`: browse the demo claims
 2. `GET /claims/{id}/explanation` on a **DENIED** claim: the rule, reason code
@@ -51,7 +58,7 @@ Every response lists the claim's `allowed_actions`.
 
 ```mermaid
 flowchart TB
-    Client["Provider / reviewer<br/>(Swagger UI, curl)"] -->|HTTPS JSON| API
+    Client["Reviewer / provider<br/>(dashboard, Swagger UI, curl)"] -->|HTTPS JSON| API
 
     subgraph App["ClaimFlow (FastAPI on Render)"]
         MW["Middleware<br/>request id · JSON logs · metrics"]
@@ -72,7 +79,7 @@ flowchart TB
     SVC --> VAL & ENG & SM & REM & EXP
     ENG --> PRC
     SVC --> REPO --> DB[("PostgreSQL on Neon<br/>CHECK constraints · transition trigger<br/>append-only, hash-chained audit log")]
-    GH["GitHub"] -->|push| CI["GitHub Actions<br/>lint · migrations · 164 tests"] -->|green| Render["Render auto-deploy"]
+    GH["GitHub"] -->|push| CI["GitHub Actions<br/>lint · migrations · 166 tests"] -->|green| Render["Render auto-deploy"]
 ```
 
 The **domain core never imports FastAPI or SQLAlchemy**: rules, pricing, the
@@ -149,9 +156,9 @@ createdb claimflow && createdb claimflow_test
 uv run alembic upgrade head               # build the schema
 uv run python -m scripts.demo_seed        # reference data + 11 demo claims
 uv run uvicorn claimflow.main:app --reload
-# open http://localhost:8000  (redirects to Swagger)
+# open http://localhost:8000 (dashboard) or /docs (API)
 
-uv run pytest                             # 164 tests against claimflow_test
+uv run pytest                             # 166 tests against claimflow_test
 ```
 
 ## API overview
@@ -174,7 +181,7 @@ Full interactive docs at `/docs`.
 
 ## Testing and quality
 
-- **164 tests, 99% coverage**, in three layers:
+- **166 tests, 99% coverage**, in three layers:
   - **pure unit tests** for validation, pricing, rules, the state machine, remittance and explanations (no DB)
   - **integration tests** through HTTP against real PostgreSQL
   - **property and attack tests**: state-graph reachability, money reconciliation, audit tamper scenarios, metric-cardinality guard
@@ -192,6 +199,7 @@ src/claimflow/
   repositories/    SQLAlchemy queries; rows -> domain objects
   api/             FastAPI routers;  schemas.py = HTTP contract
   models.py        database schema;  middleware.py, metrics.py, logging_config.py
+  static/          index.html: the dashboard (plain HTML + JS, read-only API client)
 migrations/        Alembic migrations 0001-0005 (incl. triggers, hash chain)
 scripts/           seed.py (reference data), demo_seed.py (demo claims), start.sh
 tests/             unit + integration tests

@@ -100,14 +100,35 @@ def test_demo_load_is_idempotent(capsys):
     assert all(ln.startswith("exists") for ln in scenario_lines)
 
 
-def test_root_redirects_to_swagger(client):
-    resp = client.get("/", follow_redirects=False)
-    assert resp.status_code == 307
-    assert resp.headers["location"] == "/docs"
-    assert client.get("/docs").status_code == 200
+def test_root_serves_the_dashboard(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    assert "<title>ClaimFlow</title>" in resp.text
+    assert client.get("/docs").status_code == 200  # Swagger stays one click away
 
 
 def test_health_and_root_answer_head_requests(client):
     """Uptime monitors and load balancers often probe with HEAD."""
     assert client.head("/health").status_code == 200
-    assert client.head("/", follow_redirects=False).status_code == 307
+    assert client.head("/").status_code == 200
+
+
+def test_dashboard_only_calls_endpoints_that_exist(client):
+    """Guard: if an endpoint the page uses is renamed or removed, this fails
+    instead of the live dashboard silently breaking."""
+    import re
+
+    page = client.get("/").text
+    used = set(re.findall(r"api\(`?\"?(/[a-z/${}.]+)", page))
+    used = {re.sub(r"\$\{[^}]+\}", "{claim_id}", u).split("?")[0] for u in used}
+    routes = set(client.get("/openapi.json").json()["paths"])
+    assert used, "found no API calls in the page"
+    assert used <= routes, f"dashboard calls unknown endpoints: {used - routes}"
+
+
+def test_dashboard_never_inserts_api_data_as_html(client):
+    """XSS guard: values from the API must go in as text, never via innerHTML."""
+    page = client.get("/").text
+    assert "innerHTML" not in page and "outerHTML" not in page
+    assert "insertAdjacentHTML" not in page and "document.write" not in page

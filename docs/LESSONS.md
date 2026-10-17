@@ -16,6 +16,7 @@ as they're completed.
 - [Phase 6: Audit log](#phase-6-audit-log)
 - [Phase 7: Quality and observability](#phase-7-quality-and-observability)
 - [Phase 8: Ship it](#phase-8-ship-it)
+- [Phase 9: Dashboard](#phase-9-dashboard)
 - [Glossary](#glossary)
 
 ---
@@ -2117,7 +2118,7 @@ test writes would stay in the demo forever) passed everywhere except two spots:
 
 ### 8.6 The landing experience
 
-- `/` redirects to **Swagger** (`/docs`).
+- `/` redirected to **Swagger** (`/docs`). (Phase 9 replaced this with a dashboard.)
 - The Swagger page opens with a **"Try it in 60 seconds"** guide pointing at
   the explanation, remittance, audit-verify and stats endpoints.
 - The README works on two clocks: a recruiter understands it in **2 minutes**
@@ -2227,6 +2228,153 @@ instance.
 
 ---
 
+## Phase 9: Dashboard
+
+### 9.1 Why add a UI to a backend project
+
+Swagger proves the API works, but it's a developer tool. A recruiter needs to
+*see* the idea in seconds: claims, decisions, and **why**. The dashboard is
+the home page (`/`); Swagger stays at `/docs`.
+
+### 9.2 Architecture: just another client of the API
+
+- **One static file** (`src/claimflow/static/index.html`): plain HTML, CSS and
+  JavaScript. No React, no bundler, no build step, no second host.
+- Served by the **same FastAPI app**, so the page and API share one **origin**,
+  which means **no CORS** configuration is needed.
+- It calls **only the public JSON endpoints** (`/claims`, `/stats`,
+  `/explanation`, `/remittance`, `/audit`, `/audit/verify`), exactly like
+  Swagger or curl. No special backend code for the UI.
+
+| Choice | Why | Trade-off |
+|---|---|---|
+| Plain JS, no framework | Zero build/deploy complexity; fits a backend portfolio | Manual DOM code; fine at this size, wouldn't scale to a big app |
+| Same origin as the API | No CORS, one deploy, one URL | UI and API scale/deploy together |
+| **Read-only** | The audit log is append-only: claims submitted from the demo could never be removed | Visitors who want to submit claims use Swagger |
+
+### 9.3 Security: never put API data into HTML
+
+Claim fields contain whatever a caller sent. If a `member_id` were
+`<img src=x onerror=alert(1)>` and the page did
+`row.innerHTML = claim.member_id`, the browser would **execute** it:
+**cross-site scripting (XSS)**. The page builds every element with
+`createElement` and inserts values as **text** (`append` / `textContent`),
+so they can only ever display, never run.
+
+A test enforces it: the page must contain no `innerHTML`, `outerHTML`,
+`insertAdjacentHTML` or `document.write`.
+
+### 9.4 Contract test between UI and API
+
+`test_dashboard_only_calls_endpoints_that_exist` extracts every `api(...)` path
+from the page and checks it against the app's **OpenAPI schema**. Rename or
+remove an endpoint the dashboard uses, and CI fails, instead of the live page
+silently breaking. It's a lightweight **contract test**.
+
+### 9.5 Testing what tests can't see
+
+Unit tests passed, but they can't see a page. A **headless browser**
+(Playwright + Chromium, installed only in a scratch folder, not the project)
+loaded the dashboard, clicked through filters and claims, captured console
+errors and took screenshots on desktop (light) and phone (dark). It caught
+**four real bugs** the test suite couldn't:
+
+1. Line decisions printed `[object HTMLTableRowElement]`: a helper flattened
+   nested children only one level deep (`flat()` → `flat(Infinity)`). Safe
+   text-only insertion meant it was *displayed*, not executed.
+2. A dark border on claim rows: browser default `<button>` styles, only
+   partially reset.
+3. On phones, the claims panel overflowed the screen. A CSS grid `1fr` column
+   can't shrink below its content's width; `minmax(0, 1fr)` can.
+4. On phones, the detail panel sits below the list, so tapping a claim seemed
+   to do nothing. It now scrolls into view.
+
+**Lesson:** *verify the thing the user actually sees*, not just the code
+behind it.
+
+### 9.6 Other UI details worth noticing
+
+- **Cold start:** the page says the free server may take a minute to wake,
+  instead of looking broken.
+- **Shareable links:** the selected claim lives in the URL hash
+  (`#claim=<id>`), so a specific explanation can be linked.
+- **Accessibility basics:** real `<button>`s (keyboard-usable),
+  `aria-pressed` on filters, `aria-current` on the selected claim,
+  `aria-live` on the detail panel, light and dark color schemes.
+- **Race guard:** if you click a second claim while the first is loading, the
+  stale response is ignored (`if (selectedId() !== id) return`).
+
+### Phase 9: questions
+
+**Q9.1 (interview).** Why plain HTML/JS instead of React for the dashboard?
+
+<details><summary>Answer</summary>
+
+The project is a backend showcase; the dashboard is one read-only page. Plain
+JS needs no build step, no bundler, no second deploy, and no extra
+dependencies to audit. React (or similar) earns its keep with lots of shared
+state, routing and components, and it would add complexity here without adding
+value. If the UI grew (editing, many views), I'd switch.
+
+</details>
+
+**Q9.2 (interview).** What is XSS and how does your dashboard prevent it?
+
+<details><summary>Answer</summary>
+
+Cross-site scripting: untrusted data ends up interpreted as HTML/JavaScript in
+someone's browser. Claim fields are caller-supplied, so they're untrusted. The
+page never uses `innerHTML`; it builds elements with `createElement` and inserts
+values as **text**, which the browser never executes. A test fails the build if
+`innerHTML`/`insertAdjacentHTML`/`document.write` ever appear in the page.
+
+</details>
+
+**Q9.3 (interview).** Why is the dashboard read-only?
+
+<details><summary>Answer</summary>
+
+The audit log is append-only by design (triggers + hash chain), and claims
+can't be deleted because their audit history references them. Anything a
+visitor submitted through a public demo would stay forever. Showing everything
+read-only keeps the demo clean; Swagger remains available for anyone who wants
+to exercise the write endpoints.
+
+</details>
+
+**Q9.4 (interview).** How do you stop the UI and API from drifting apart?
+
+<details><summary>Answer</summary>
+
+A **contract test**: it extracts every endpoint the page calls and asserts each
+exists in the app's OpenAPI schema. Renaming or removing an endpoint the UI
+depends on fails CI instead of breaking the live page.
+
+</details>
+
+**Q9.5 (bonus).** Why didn't the dashboard need any CORS configuration?
+
+<details><summary>Answer</summary>
+
+CORS only applies to **cross-origin** requests. The page is served by the same
+app, scheme, host and port as the API, so every `fetch` is same-origin.
+
+</details>
+
+**Q9.6 (bonus).** All tests passed but the page had bugs. How did you find
+them?
+
+<details><summary>Answer</summary>
+
+By testing what the user sees: a headless browser loaded the page on desktop
+and phone sizes, clicked through it, collected console errors and took
+screenshots. That caught a rendering bug, a styling bug, a mobile overflow and
+a mobile usability issue that no API test could see.
+
+</details>
+
+---
+
 ## Glossary
 
 | Term | Meaning |
@@ -2249,6 +2397,8 @@ instance.
 | **Edit** | A front-end validation check; failing one rejects the claim |
 | **Defense in depth** | Enforcing a rule at several layers (app + database) so one failure doesn't break it |
 | **Contextvars** | Python's per-request/per-task context storage; structlog merges it into every log line |
+| **CORS** | Browser rule restricting cross-origin requests; not needed when page and API share an origin |
+| **Contract test** | Test that a consumer (our dashboard) only uses what the provider (the API) actually offers |
 | **Correlation id** | Id shared by all events from one operation, to group and trace them |
 | **Deadlock** | Two transactions each waiting for a lock the other holds; prevented by a consistent lock order |
 | **Fee schedule** | Contracted price per procedure (the basis of the allowed amount) |
@@ -2260,6 +2410,7 @@ instance.
 | **Pre-deploy step** | One-off job (e.g. migrations) run once before new instances start |
 | **Pure function** | Output depends only on inputs; no I/O, no clock, no hidden state |
 | **Structured logging** | Logs as key/value data (JSON), searchable by field |
+| **XSS** | Cross-site scripting: untrusted data executed as code in a browser; prevented by inserting text, not HTML |
 | **Zero-downtime deploy** | New version takes traffic only after its health check passes |
 | **Strategy pattern** | Interchangeable objects sharing one interface (our rules), chosen/ordered at runtime |
 | **SHA pinning** | Referencing a CI action by immutable commit hash instead of a movable tag |
@@ -2279,6 +2430,7 @@ instance.
 | **Histogram** | Metric that counts observations into buckets, enabling percentiles |
 | **Hash chain** | Each record stores a hash of the previous one + itself, making edits detectable |
 | **Infrastructure as code** | Deployment config (e.g. render.yaml) kept in git and reviewed like code |
+| **Headless browser** | A real browser run without a window, for automated UI checks and screenshots |
 | **ICD-10-CM** | Diagnosis codes (the *why*); public domain |
 | **Idempotency** | Repeating a request has the same effect as sending it once |
 | **Manual pricing** | A covered service with no contracted rate; a human sets the price (we PEND it) |
