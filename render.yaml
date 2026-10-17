@@ -4,7 +4,7 @@ services:
     name: claimflow
     runtime: python
     plan: free
-    region: oregon          # keep it next to the Neon database (AWS us-west-2)
+    region: ohio            # same region as the Neon database (AWS us-east-2)
     branch: main
     # Python version comes from .python-version (3.13).
     buildCommand: pip install uv && uv sync --locked --no-dev

@@ -208,7 +208,7 @@ render.yaml        deployment as code
   dashboard and never committed.
 - **Limits designed around:** Render sleeps after ~15 min idle (cold start ~30–60 s;
   demo data loading is idempotent, so restarts are harmless); Neon free has
-  ~0.5 GB storage and suspends idle compute (`pool_pre_ping` handles dropped
+  1 GB storage and scales to zero when idle (`pool_pre_ping` handles dropped
   connections); in-memory metrics reset on restart, so business KPIs come from
   the database (`/stats`).
 

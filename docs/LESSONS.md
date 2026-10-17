@@ -183,7 +183,7 @@ stateDiagram-v2
 | Prod DB | **Neon** (free Postgres) | Doesn't expire (Render's free DB is deleted after ~30 days) | Supabase (pauses inactive projects) |
 
 **Free-tier limits we design around:** Render sleeps after ~15 min idle (first
-request takes ~30–60 s); Neon free is ~0.5 GB and auto-suspends. Our data is
+request takes ~30–60 s); Neon free is 1 GB and scales to zero when idle. Our data is
 tiny, so both are fine.
 
 ### 0.11 Architecture
@@ -2017,7 +2017,7 @@ process, which is why `/stats` computes them from the database instead.
 
 | Service | Job | Free-tier facts we designed around |
 |---|---|---|
-| **Neon** | PostgreSQL | No expiry, ~0.5 GB, compute auto-suspends when idle → `pool_pre_ping=True` survives dropped connections |
+| **Neon** | PostgreSQL | No expiry, 1 GB, scales to zero when idle → `pool_pre_ping=True` survives dropped connections |
 | **Render** | Runs the web app | Sleeps after ~15 min idle → cold start ~30–60 s; 512 MB RAM → one uvicorn process, small DB pool (5 + 5 overflow) |
 
 Why not Render's own Postgres? Its free database is **deleted after ~30 days**,
@@ -2033,8 +2033,10 @@ reproducible, unlike clicking through a dashboard.
   its value is typed into the Render dashboard.
 - **`autoDeployTrigger: checksPass`:** Render deploys a commit only after **CI
   passes**, so a red build never reaches the live demo.
-- **Same region** for app and DB (Oregon / AWS us-west-2) keeps every query
-  low-latency.
+- **Same region** for app and DB (Ohio / AWS us-east-2) keeps every query
+  low-latency. **App↔DB distance matters more than user↔app distance:** one
+  adjudication makes about a dozen queries, so cross-region DB latency is paid a
+  dozen times per request, while the user's distance is paid once.
 - **12-factor config:** the host gives `postgresql://…`; a Pydantic validator
   rewrites it to `postgresql+psycopg://…` (SQLAlchemy needs the driver named).
 
