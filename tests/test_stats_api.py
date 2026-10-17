@@ -18,6 +18,13 @@ def test_stats_on_empty_database(client):
     assert body["line_denial_rate"] is None
     assert body["top_denial_reasons"] == []
     assert body["adjudication_latency"] == {"runs": 0, "p50_ms": None, "p95_ms": None}
+    assert body["dollars"] == {
+        "billed": "0.00",
+        "allowed": "0.00",
+        "paid": "0.00",
+        "patient_responsibility": "0.00",
+        "provider_write_off": "0.00",
+    }
 
 
 def test_stats_after_a_mix_of_outcomes(client, claim_payload):
@@ -47,6 +54,15 @@ def test_stats_after_a_mix_of_outcomes(client, claim_payload):
             "lines": 1,
         }
     ]
+    # PAID claim: 99213 allowed $90 ($25 copay -> $65 paid); 87880 allowed $20, all
+    # to the deductible. DENIED MRI: $1,500 billed, nothing paid. REJECTED: excluded.
+    assert body["dollars"] == {
+        "billed": "1750.00",
+        "allowed": "110.00",
+        "paid": "65.00",
+        "patient_responsibility": "45.00",
+        "provider_write_off": "1640.00",
+    }
     latency = body["adjudication_latency"]
     assert latency["runs"] == 2
     assert 0 < latency["p50_ms"] <= latency["p95_ms"]

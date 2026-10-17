@@ -1885,6 +1885,9 @@ computed from the **database**:
 - **top denial reasons** (CARC + rule + count)
 - **adjudication latency p50 / p95**, from the `duration_ms` now recorded in
   each adjudication's **audit event** (`percentile_cont` in SQL)
+- **where the money went** (added later for the dashboard): billed, allowed,
+  paid, owed by patients and written off by providers, over finalized claims,
+  summed in SQL. It balances: billed = paid + patient + write-off
 
 | | `/metrics` | `/stats` |
 |---|---|---|

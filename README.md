@@ -174,7 +174,7 @@ uv run pytest                             # 166 tests against claimflow_test
 | GET | `/claims/{id}/remittance` | 835-style payment summary with CO/PR reason codes |
 | GET | `/claims/{id}/explanation` | Why each line was decided, from the audit log |
 | GET | `/claims/{id}/audit`, `/audit/verify` | Hash-chained audit trail / integrity check |
-| GET | `/stats` | Claims by status, denial rates, top denial reasons, latency |
+| GET | `/stats` | Claims by status, denial rates, top denial reasons, latency, where the money went |
 | GET | `/metrics`, `/health` | Prometheus metrics / health check |
 
 Full interactive docs at `/docs`.

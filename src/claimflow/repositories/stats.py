@@ -1,11 +1,13 @@
 """Aggregate queries for business KPIs. Computed from the database, so they
 survive restarts (unlike in-memory Prometheus counters)."""
 
+from decimal import Decimal
+
 from sqlalchemy import Float, cast, func, select
 from sqlalchemy.orm import Session
 
 from claimflow.domain.enums import AuditEventType
-from claimflow.models import AuditEvent, Claim, ClaimLineAdjudication
+from claimflow.models import AuditEvent, Claim, ClaimLine, ClaimLineAdjudication
 
 
 class StatsRepository:
@@ -51,3 +53,20 @@ class StatsRepository:
             )
         ).one()
         return row[0], row[1], row[2]
+
+    def finalized_dollars(self) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+        """(billed, allowed, paid, patient_responsibility) over the lines of
+        finalized (PAID/DENIED) claims. Pended claims haven't paid anything yet."""
+        zero = Decimal("0.00")
+        row = self.session.execute(
+            select(
+                func.coalesce(func.sum(ClaimLine.billed_amount), zero),
+                func.coalesce(func.sum(ClaimLineAdjudication.allowed), zero),
+                func.coalesce(func.sum(ClaimLineAdjudication.paid), zero),
+                func.coalesce(func.sum(ClaimLineAdjudication.patient_responsibility), zero),
+            )
+            .join(Claim, Claim.id == ClaimLine.claim_id)
+            .join(ClaimLineAdjudication, ClaimLineAdjudication.claim_line_id == ClaimLine.id)
+            .where(Claim.status.in_(["PAID", "DENIED"]))
+        ).one()
+        return row[0], row[1], row[2], row[3]

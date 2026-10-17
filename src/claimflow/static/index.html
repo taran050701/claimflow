@@ -40,11 +40,12 @@
   .notice { margin: 12px 0; padding: 10px 14px; border-radius: 8px; background: var(--accent-soft); }
   .notice.error { background: var(--denied-soft); color: var(--denied); }
 
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 16px 0; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 16px 0; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
   .card .k { color: var(--muted); font-size: 13px; }
   .card .v { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .card .s { color: var(--muted); font-size: 13px; }
+  .split { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; margin-top: 8px; font-size: 13px; }
   .reasons { display: grid; gap: 6px; margin-top: 6px; }
   .reason { display: grid; grid-template-columns: 52px 1fr auto; gap: 8px; align-items: center; font-size: 13px; }
   .bar { height: 6px; border-radius: 3px; background: var(--denied); opacity: .75; }
@@ -200,6 +201,13 @@ function renderStats(s) {
       el("div", { class: "k" }, "Adjudication latency"),
       el("div", { class: "v" }, lat.p50_ms == null ? "–" : `${Math.round(lat.p50_ms)} ms`),
       el("div", { class: "s" }, lat.p95_ms == null ? "no runs yet" : `median (p50) · p95 ${Math.round(lat.p95_ms)} ms · ${lat.runs} runs`)),
+    el("div", { class: "card" },
+      el("div", { class: "k" }, "Paid by the insurer"),
+      el("div", { class: "v" }, money(s.dollars.paid)),
+      el("div", { class: "s" }, `of ${money(s.dollars.billed)} billed (finalized claims)`),
+      el("div", { class: "split" },
+        el("span", {}, "Patients owe"), el("span", { class: "money" }, money(s.dollars.patient_responsibility)),
+        el("span", {}, "Providers wrote off"), el("span", { class: "money" }, money(s.dollars.provider_write_off)))),
     el("div", { class: "card" },
       el("div", { class: "k" }, "Top denial reasons"),
       el("div", { class: "reasons" },
