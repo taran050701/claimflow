@@ -1787,7 +1787,7 @@ chain) complements tamper **prevention**.
 ### 7.1 Continuous integration (CI)
 
 `.github/workflows/ci.yml` runs on **every push to main and every pull
-request**, on GitHub's servers, against a **real PostgreSQL 16** service
+request**, on GitHub's servers, against a **real PostgreSQL 18** service (the same major version as production on Neon)
 container:
 
 1. `uv sync --locked`: install **exactly** the locked versions (fails if
@@ -1916,7 +1916,7 @@ simple.
 
 <details><summary>Answer</summary>
 
-On every push/PR, against a real Postgres 16: install exactly the locked
+On every push/PR, against a real Postgres 18 (production's version): install exactly the locked
 dependencies; lint and format-check; apply migrations and confirm they match the
 models (`alembic check`); confirm migrations are reversible (downgrade base →
 upgrade head); run all tests with a 95% coverage floor. Each step catches a

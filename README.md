@@ -127,7 +127,7 @@ answers, in **[docs/LESSONS.md](docs/LESSONS.md)**.
 |---|---|---|
 | Language | Python 3.13 | Fast iteration; type hints + Pydantic for safety |
 | API | FastAPI | Automatic OpenAPI/Swagger docs from type hints |
-| Database | PostgreSQL 16 | Transactions, `NUMERIC` money, constraints, triggers, JSONB |
+| Database | PostgreSQL 18 (Neon; works on 16+) | Transactions, `NUMERIC` money, constraints, triggers, JSONB |
 | ORM / migrations | SQLAlchemy 2 + Alembic | Industry standard; reviewed, reversible migrations |
 | Tests | pytest (+ pytest-cov) | Pure unit tests + integration tests against real Postgres |
 | Observability | structlog, prometheus-client | JSON logs, metrics with bounded labels |
@@ -137,7 +137,7 @@ answers, in **[docs/LESSONS.md](docs/LESSONS.md)**.
 
 ## Run it locally (≈10 minutes)
 
-**Prerequisites:** Python 3.13, PostgreSQL 16 running locally,
+**Prerequisites:** Python 3.13, PostgreSQL 16 or newer running locally,
 [uv](https://docs.astral.sh/uv/).
 
 ```bash
