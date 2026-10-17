@@ -1,0 +1,20 @@
+# Render Blueprint: the deployment, as code. New -> Blueprint -> pick this repo.
+services:
+  - type: web
+    name: claimflow
+    runtime: python
+    plan: free
+    region: oregon          # keep it next to the Neon database (AWS us-west-2)
+    branch: main
+    # Python version comes from .python-version (3.13).
+    buildCommand: pip install uv && uv sync --locked --no-dev
+    startCommand: ./scripts/start.sh
+    healthCheckPath: /health   # traffic switches to a new deploy only once this answers
+    autoDeployTrigger: checksPass   # deploy only commits whose CI checks passed
+    envVars:
+      - key: DATABASE_URL
+        sync: false         # secret: entered in the Render dashboard, never committed
+      - key: LOG_FORMAT
+        value: json
+      - key: LOG_LEVEL
+        value: INFO

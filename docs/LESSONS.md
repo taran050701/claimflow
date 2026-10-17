@@ -15,6 +15,7 @@ as they're completed.
 - [Phase 5: Remittance](#phase-5-remittance)
 - [Phase 6: Audit log](#phase-6-audit-log)
 - [Phase 7: Quality and observability](#phase-7-quality-and-observability)
+- [Phase 8: Ship it](#phase-8-ship-it)
 - [Glossary](#glossary)
 
 ---
@@ -88,6 +89,7 @@ deductible remaining and 20% coinsurance.
 | **CAS / CLP / SVC** | 835 segments: adjustments / claim payment info / service line |
 | **CO / PR group codes** | Who owes an unpaid dollar: provider writes off (CO) / patient pays (PR) |
 | **CI** | Continuous integration: every push is automatically linted, migrated and tested |
+| **Cold start** | Delay while a sleeping free-tier server boots on the first request |
 | **Coinsurance** | $70 | After the deductible, the cost is split by percentage: 20% × $350. |
 | **Payer pays** | **$280** | $350 − $70 |
 | **Patient owes** | **$320** | $250 + $70 |
@@ -2009,6 +2011,203 @@ process, which is why `/stats` computes them from the database instead.
 
 ---
 
+## Phase 8: Ship it
+
+### 8.1 Two free services, one job each
+
+| Service | Job | Free-tier facts we designed around |
+|---|---|---|
+| **Neon** | PostgreSQL | No expiry, ~0.5 GB, compute auto-suspends when idle → `pool_pre_ping=True` survives dropped connections |
+| **Render** | Runs the web app | Sleeps after ~15 min idle → cold start ~30–60 s; 512 MB RAM → one uvicorn process, small DB pool (5 + 5 overflow) |
+
+Why not Render's own Postgres? Its free database is **deleted after ~30 days**,
+which is fatal for a portfolio demo that must still work months later.
+
+### 8.2 Infrastructure as code: `render.yaml`
+
+The deployment is a file in git (a Render "Blueprint"): build command, start
+command, region, health check, env vars. It's reviewable, versioned and
+reproducible, unlike clicking through a dashboard.
+
+- **Secrets never in git:** `DATABASE_URL` is declared with `sync: false` and
+  its value is typed into the Render dashboard.
+- **`autoDeployTrigger: checksPass`:** Render deploys a commit only after **CI
+  passes**, so a red build never reaches the live demo.
+- **Same region** for app and DB (Oregon / AWS us-west-2) keeps every query
+  low-latency.
+- **12-factor config:** the host gives `postgresql://…`; a Pydantic validator
+  rewrites it to `postgresql+psycopg://…` (SQLAlchemy needs the driver named).
+
+### 8.3 The start script (`scripts/start.sh`)
+
+```sh
+set -e
+.venv/bin/alembic upgrade head          # idempotent
+.venv/bin/python -m scripts.demo_seed   # idempotent
+exec .venv/bin/uvicorn claimflow.main:app --host 0.0.0.0 --port "$PORT" ...
+```
+
+- **`set -e`**: stop at the first failure; never serve traffic on a
+  half-migrated database.
+- **Migrations at startup**: fine for **one** instance. With several, they'd
+  race to migrate, so bigger setups run migrations once in a separate
+  **pre-deploy** step.
+- **`exec`**: uvicorn *replaces* the shell, so it receives the platform's
+  **SIGTERM** directly and shuts down gracefully (finishes in-flight requests).
+  Without `exec`, the shell gets the signal and uvicorn may be killed abruptly.
+- **`--proxy-headers`**: behind Render's load balancer, trust
+  `X-Forwarded-*` for the real client IP and scheme (https).
+- **Health check (`/health`)**: Render switches traffic to a new deploy only
+  once it answers, giving **zero-downtime deploys**.
+
+### 8.4 Idempotent demo data
+
+The start script runs on **every deploy and every wake-up**, so loading demo
+data twice must change nothing.
+- Each demo scenario submits its claim with a fixed **Idempotency-Key**
+  (`demo-mri-lesson`, …), reusing the Phase 1 feature. A scenario whose claim
+  exists is skipped.
+- Claims go through the **real service** (validation, rules, state machine,
+  audit), so demo data is produced exactly like real data, audit chain
+  included.
+- Dates are **relative to today**, so demo claims never age past timely filing.
+- **Reference data splits two ways:**
+
+| Kind | Examples | Strategy | Why |
+|---|---|---|---|
+| Static | plans, codes, fee schedule | **upsert** (`merge`) | Safe to rewrite; picks up corrections |
+| Mutable state | accumulators, auths | **insert-if-missing** (`ON CONFLICT DO NOTHING`) | Resetting a deductible that claims already used would contradict the audit log |
+
+- Tested: every scenario reaches its intended status and reason code, the MRI
+  reproduces $600 / $280 / $320, and a second run changes **zero rows**.
+
+The 11 scenarios: PAID (the MRI lesson, office visit, partial with one denied
+line, appeal overturned), DENIED (CO-18 duplicate, CO-197 no auth, CO-96 not
+covered, CO-27 terminated, CO-151 too many units), PENDED (auth under review),
+REJECTED (unknown member + fake code).
+
+### 8.5 Rehearse the deploy before deploying
+
+We copied the repo to a clean folder, ran Render's **exact** build command and
+start script against a **brand-new empty database** with a plain
+`postgresql://` URL, then started it **again** (like a wake-up). It caught a
+real bug: the demo loader ran outside the web app, never configured logging,
+and printed **non-JSON** log lines that production log search couldn't parse.
+Fixed before it ever reached Render. **Cheap rehearsal beats debugging a remote
+box.**
+
+### 8.6 The landing experience
+
+- `/` redirects to **Swagger** (`/docs`).
+- The Swagger page opens with a **"Try it in 60 seconds"** guide pointing at
+  the explanation, remittance, audit-verify and stats endpoints.
+- The README works on two clocks: a recruiter understands it in **2 minutes**
+  (one worked example, a live link, diagrams); an engineer runs it in **10**.
+- We **verified the README's numbers** against the real system and found two
+  wrong (audit event count, number of edits). Docs are code too: check them.
+
+### Phase 8: questions
+
+**Q8.1 (interview).** Walk me through how ClaimFlow is deployed.
+
+<details><summary>Answer</summary>
+
+GitHub push → CI (lint, migrations, 163 tests) → Render deploys only if checks
+pass (`autoDeployTrigger: checksPass`) using `render.yaml`. Build: `uv sync
+--locked --no-dev`. Start: `alembic upgrade head` → idempotent demo seed →
+`exec uvicorn`. Render routes traffic once `/health` answers. The database is
+Neon Postgres in the same region; its URL is a secret set in Render's dashboard.
+
+</details>
+
+**Q8.2 (interview).** Why run migrations at startup, and when would you stop
+doing that?
+
+<details><summary>Answer</summary>
+
+With a single instance it's simple and guarantees the schema matches the code
+before serving. With multiple instances they'd race (Alembic has no built-in
+lock), and a slow migration would block every boot. Then you run migrations
+once, as a separate **pre-deploy job**, and design them to be
+backward-compatible (expand → migrate → contract) so old and new code can
+run side by side during a rolling deploy.
+
+</details>
+
+**Q8.3 (interview).** Why `exec` in the start script?
+
+<details><summary>Answer</summary>
+
+Without it, the shell is the main process and uvicorn is its child. The
+platform's SIGTERM goes to the shell, which may not forward it, so uvicorn gets
+killed abruptly, dropping in-flight requests. `exec` replaces the shell with
+uvicorn, so uvicorn receives SIGTERM and shuts down gracefully.
+
+</details>
+
+**Q8.4 (interview).** How do you load demo/seed data safely on every deploy?
+
+<details><summary>Answer</summary>
+
+Make it **idempotent**. Demo claims use fixed Idempotency-Keys, so existing ones
+are skipped. Static reference data is upserted. Mutable state (accumulators,
+auths) is insert-if-missing, never overwritten, because resetting it would
+contradict decisions already recorded. We test that a second run changes zero
+rows.
+
+</details>
+
+**Q8.5 (interview).** How do you keep secrets out of the repository?
+
+<details><summary>Answer</summary>
+
+Config comes from environment variables (12-factor). The repo has
+`.env.example` with harmless local values; real `.env` is gitignored.
+`render.yaml` declares `DATABASE_URL` with `sync: false`, so the value is
+entered only in Render's dashboard. Before the first public push we also
+scanned the staged files for secret-looking strings.
+
+</details>
+
+**Q8.6 (bonus).** What does the free tier cost you, and how did you design
+around it?
+
+<details><summary>Answer</summary>
+
+Render sleeps after ~15 min, so: a cold-start note in the README/Swagger, an
+idempotent startup, and DB-backed `/stats` because in-memory metrics reset.
+Neon suspends idle compute and drops connections, so `pool_pre_ping`. 512 MB
+RAM means one process and a small connection pool. Render's free Postgres
+expires, so the database lives on Neon.
+
+</details>
+
+**Q8.7 (bonus).** Why rehearse the deploy locally first? What did it catch?
+
+<details><summary>Answer</summary>
+
+It runs the exact build and start commands against an empty database and
+then restarts, like the platform will, but with instant feedback. It caught
+non-JSON logs from the demo loader (it never configured logging because it
+runs outside the app), and it confirmed the URL normalization, migrations from
+zero, and idempotent restarts.
+
+</details>
+
+**Q8.8 (bonus).** What's a zero-downtime deploy and how does the health check
+enable it?
+
+<details><summary>Answer</summary>
+
+The new version starts alongside the old one, and traffic switches only once
+the new one reports healthy (`/health` answers). If it never gets healthy, the
+old version keeps serving, so users never hit a broken or half-started
+instance.
+
+</details>
+
+---
+
 ## Glossary
 
 | Term | Meaning |
@@ -2026,6 +2225,7 @@ process, which is why `/stats` computes them from the database instead.
 | **CAS / CLP / SVC** | 835 segments: adjustments / claim payment info / service line |
 | **CO / PR group codes** | Who owes an unpaid dollar: provider writes off (CO) / patient pays (PR) |
 | **CI** | Continuous integration: every push is automatically linted, migrated and tested |
+| **Cold start** | Delay while a sleeping free-tier server boots on the first request |
 | **Coinsurance** | Percentage of cost the patient pays after the deductible |
 | **Edit** | A front-end validation check; failing one rejects the claim |
 | **Defense in depth** | Enforcing a rule at several layers (app + database) so one failure doesn't break it |
@@ -2038,13 +2238,17 @@ process, which is why `/stats` computes them from the database instead.
 | **Pessimistic locking** | Lock a row before changing it (`SELECT … FOR UPDATE`) so concurrent changes run one at a time |
 | **Optimistic locking** | Don't lock; detect a concurrent change via a version column and retry |
 | **Prometheus** | Pull-based metrics system that scrapes `/metrics` text endpoints |
+| **Pre-deploy step** | One-off job (e.g. migrations) run once before new instances start |
 | **Pure function** | Output depends only on inputs; no I/O, no clock, no hidden state |
 | **Structured logging** | Logs as key/value data (JSON), searchable by field |
+| **Zero-downtime deploy** | New version takes traffic only after its health check passes |
 | **Strategy pattern** | Interchangeable objects sharing one interface (our rules), chosen/ordered at runtime |
 | **SHA pinning** | Referencing a CI action by immutable commit hash instead of a movable tag |
+| **SIGTERM** | Polite "please shut down" signal platforms send before stopping a process |
 | **State machine** | Finite set of states + a table of legal transitions; everything else is illegal |
 | **Trigger** | Database function that runs automatically on INSERT/UPDATE/DELETE; we use one to enforce transitions |
 | **Tamper-evident** | Changes can't be prevented by everyone, but are always detectable |
+| **Upsert** | Insert, or update if the row exists |
 | **Timely filing** | Deadline for submitting a claim after the date of service |
 | **Copay** | Flat fee per service (e.g. $25 office visit) |
 | **CPT** | Procedure codes (the *what*); AMA-copyrighted |
@@ -2055,6 +2259,7 @@ process, which is why `/stats` computes them from the database instead.
 | **HATEOAS** | REST idea: responses tell the client what it can do next (our `allowed_actions`) |
 | **Histogram** | Metric that counts observations into buckets, enabling percentiles |
 | **Hash chain** | Each record stores a hash of the previous one + itself, making edits detectable |
+| **Infrastructure as code** | Deployment config (e.g. render.yaml) kept in git and reviewed like code |
 | **ICD-10-CM** | Diagnosis codes (the *why*); public domain |
 | **Idempotency** | Repeating a request has the same effect as sending it once |
 | **Manual pricing** | A covered service with no contracted rate; a human sets the price (we PEND it) |

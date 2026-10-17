@@ -15,7 +15,8 @@ from claimflow.config import get_settings
 # pool_pre_ping checks a connection is alive before using it. Serverless Postgres
 # (Neon) closes idle connections, so without this the first request after a quiet
 # period would fail.
-engine = create_engine(get_settings().database_url, pool_pre_ping=True)
+# Small pool: one free-tier instance, and Neon's free tier limits connections.
+engine = create_engine(get_settings().database_url, pool_pre_ping=True, pool_size=5, max_overflow=5)
 
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 

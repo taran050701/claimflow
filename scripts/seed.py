@@ -8,6 +8,7 @@ from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import delete
+from sqlalchemy.dialects.postgresql import insert
 
 from claimflow.db import SessionLocal
 from claimflow.domain.adjudication import AuthStatus
@@ -228,7 +229,21 @@ ACCUMULATORS = [
 ]
 
 
+def insert_if_missing(session, model, objects) -> None:
+    rows = [
+        {
+            c.key: getattr(obj, c.key)
+            for c in model.__table__.columns
+            if getattr(obj, c.key) is not None
+        }
+        for obj in objects
+    ]
+    if rows:
+        session.execute(insert(model).values(rows).on_conflict_do_nothing())
+
+
 def seed() -> None:
+    """Idempotent: static reference data is upserted, mutable state only inserted."""
     with SessionLocal() as session:
         # merge = insert, or update if a row with that primary key exists (an upsert).
         codes = [
@@ -246,8 +261,13 @@ def seed() -> None:
             FeeScheduleEntry(procedure_code=c, rate_per_unit=Decimal(r), max_units_per_day=m)
             for c, (r, m) in FEE_SCHEDULE.items()
         ]
-        for obj in [*fees, *PLAN_BENEFITS, *PRIOR_AUTHS, *ACCUMULATORS]:
+        for obj in [*fees, *PLAN_BENEFITS]:
             session.merge(obj)
+        # Mutable state is insert-if-missing, never overwritten: this runs on every
+        # deploy, and resetting a deductible the claims already used would make the
+        # data contradict the audit log.
+        insert_if_missing(session, PriorAuthorization, PRIOR_AUTHS)
+        insert_if_missing(session, MemberAccumulator, ACCUMULATORS)
 
         # Coverages have generated ids, so replace them wholesale instead of merging.
         member_ids = [m.id for m in MEMBERS]
